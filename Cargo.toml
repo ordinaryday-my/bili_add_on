@@ -1,0 +1,18 @@
+[package]
+name = "bili_add_on"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+clap = { version = "4.6.1", features = ["derive"] }
+image = "0.25.10"
+imageproc = "0.27.0"
+quick-xml = "0.41.0"
+regex = "1.13.0"
+reqwest = { version = "0.13.4", features = ["blocking", "gzip", "brotli"] }
+flate2 = "1.0"
+rusttype = "0.9.3"
+video-rs = "0.11.0"
+serde_json = "1.0.140"
+encoding_rs = "0.8.35"
