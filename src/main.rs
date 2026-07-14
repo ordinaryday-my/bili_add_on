@@ -7,17 +7,34 @@ use quick_xml::{
 };
 use std::{borrow::Cow, ffi::OsString, fs, path::PathBuf, process::exit, str, time::Duration};
 
+mod utils;
+
 #[derive(Debug, Parser)]
 #[command(version, author, about)]
 struct Args {
-    #[arg(long)]
+    #[arg(long, help = "视频源文件路径")]
     path: PathBuf,
 
-    #[arg(long, short)]
+    #[arg(long, short, help = "输出视频路径（默认在源文件名前添加 bili_add_on_ 前缀）")]
     output: Option<PathBuf>,
 
     #[command(flatten)]
     source: DanmakuSource,
+
+    #[arg(long, default_value_t = 0.5, help = "弹幕不透明度，取值范围 0~1")]
+    opacity: f64,
+
+    #[arg(long, short, default_value_t = 0.0, help = "弹幕显示区域上界与画面高度的比值，0 为顶端")]
+    upper_limit: f64,
+
+    #[arg(long, short, default_value_t = 1.0, help = "弹幕显示区域下界与画面高度的比值，1 为底端")]
+    lower_limit: f64,
+
+    #[arg(long, default_value_t = 20, help = "弹幕字号（像素）")]
+    font_size: u32,
+
+    #[arg(long, default_value_t = 3, help = "弹幕滚动速度（像素每帧）")]
+    speed: u32,
 }
 
 impl Args {
@@ -67,10 +84,10 @@ impl Args {
 #[derive(clap::Args, Debug)]
 #[group(required = true, multiple = false)]
 struct DanmakuSource {
-    #[arg(long, short)]
+    #[arg(long, short, help = "B站视频 ID（如 BV1fRNH6kEra），将自动拉取对应弹幕")]
     bili_id: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, help = "本地弹幕 XML 文件路径")]
     danmaku_file: Option<PathBuf>,
 }
 
@@ -131,14 +148,17 @@ fn parse_danmakus(xml: String) -> anyhow::Result<Vec<Danmaku>> {
 
                 let content = reader.read_text(s.name())?.into_inner();
 
-                danmakus.push(Danmaku::new(p_attr, content).with_context(|| {
+                if let Some(d) = Danmaku::new(p_attr, content).with_context(|| {
                     let index = danmakus.len() + 1;
                     format!("第{index}条弹幕解析失败")
-                })?);
+                })? {
+                    danmakus.push(d);
+                }
             }
             Event::Eof => break,
             _ => (),
         }
+        buf.clear();
     }
 
     Ok(danmakus)
@@ -190,12 +210,11 @@ struct Danmaku {
     mode: DanmakuMode,
     font_size: usize,
     color: Rgb<u8>,
-    weight: usize,
     text: String,
 }
 
 impl Danmaku {
-    fn new(styles: Cow<'_, str>, content: Cow<'_, [u8]>) -> anyhow::Result<Self> {
+    fn new(styles: Cow<'_, str>, content: Cow<'_, [u8]>) -> anyhow::Result<Option<Self>> {
         let mut styles_it = styles.split(',');
 
         let time_str = styles_it.next().context("p属性缺少时间字段")?;
@@ -211,7 +230,7 @@ impl Danmaku {
             .with_context(|| format!("模式字段解析为整数失败: '{mode_str}'"))?;
 
         let font_size_str = styles_it.next().context("p属性缺少字号字段")?;
-        let mut font_size = font_size_str
+        let font_size = font_size_str
             .parse::<usize>()
             .with_context(|| format!("字号字段解析为整数失败: '{font_size_str}'"))?;
 
@@ -222,137 +241,135 @@ impl Danmaku {
                 .with_context(|| format!("颜色字段解析为整数失败: '{color_str}'"))?,
         );
 
-        styles_it.next(); // 抛弃发送时间戳
-        styles_it.next(); // 抛弃弹幕池信息
-        styles_it.next(); // 抛弃发送者UID哈希值
-        styles_it.next(); // 抛弃弹幕ID
-
-        let weight_str = styles_it.next().context("p属性缺少权重字段")?;
-        let weight = weight_str
-            .parse::<usize>()
-            .with_context(|| format!("权重字段解析为整数失败: '{weight_str}'"))?;
-
-        // 确保p属性解析完毕
-        if styles_it.next().is_some() {
-            bail!("p属性包含多余字段，格式不符合预期");
+        // 忽略字段5~9: 发送时间戳、弹幕池、发送者哈希、弹幕ID、屏蔽权重
+        for _ in 0..5 {
+            styles_it.next();
         }
 
         let content_str = cow_u8_to_str(content).context("弹幕内容UTF-8解码失败")?;
 
         if mode_id == 7 {
-            // Advance 模式：content 是 JSON 数组
             let json: Vec<serde_json::Value> = serde_json::from_str(&content_str)
                 .with_context(|| format!("高级弹幕JSON解析失败，内容: {content_str:.80}"))?;
 
-            let x = json.get(0).and_then(|v| v.as_f64());
-            let y = json.get(1).and_then(|v| v.as_f64());
+            let x = json.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let y = json.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
 
-            // 出现方式：格式如 "1-1" (起始透明度-结束透明度)
-            let gradient = json.get(2).and_then(|v| v.as_str()).and_then(|s| {
-                let parts: Vec<&str> = s.split('-').collect();
-                if parts.len() == 2 {
-                    let start = parts[0].parse::<f64>().ok()?;
-                    let end = parts[1].parse::<f64>().ok()?;
-                    Some(OpacityGradient::new(start, end))
-                } else {
-                    None
-                }
-            });
+            let gradient = json
+                .get(2)
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    let parts: Vec<&str> = s.split('-').collect();
+                    if parts.len() == 2 {
+                        Some(OpacityGradient::new(
+                            parts[0].parse::<f64>().ok()?,
+                            parts[1].parse::<f64>().ok()?,
+                        ))
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| OpacityGradient::new(1.0, 1.0));
 
-            let last = json.get(3).and_then(|v| v.as_f64()).map(Duration::from_secs_f64);
+            let duration = json
+                .get(3)
+                .and_then(|v| v.as_f64())
+                .map(Duration::from_secs_f64)
+                .unwrap_or(Duration::ZERO);
 
-            // 索引4是文本内容
             let text = json.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-            let end_x = json.get(5).and_then(|v| v.as_f64());
-            let end_y = json.get(6).and_then(|v| v.as_f64());
-            let appearing_delay = json
-                .get(7)
+            let z_rotate = json.get(5).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let y_rotate = json.get(6).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let end_x = json.get(7).and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let end_y = json.get(8).and_then(|v| v.as_f64()).unwrap_or(0.0);
+
+            let move_duration = json
+                .get(9)
                 .and_then(|v| v.as_f64())
-                .map(Duration::from_secs_f64);
-            let disappearing_advanced = json
-                .get(8)
+                .map(|ms| Duration::from_millis(ms as u64))
+                .unwrap_or(Duration::ZERO);
+
+            let move_delay = json
+                .get(10)
                 .and_then(|v| v.as_f64())
-                .map(Duration::from_secs_f64);
+                .map(|ms| Duration::from_millis(ms as u64))
+                .unwrap_or(Duration::ZERO);
 
-            // 字体大小：JSON索引9会覆盖外层p属性中的字号
-            if let Some(js_font_size) = json.get(9).and_then(|v| v.as_u64()) {
-                font_size = js_font_size as usize;
-            }
+            let stroke = json.get(11).and_then(|v| v.as_u64()).map(|v| v != 0).unwrap_or(false);
+            let font_family = json.get(12).and_then(|v| v.as_str()).map(String::from).unwrap_or_default();
+            let linear_speed_up = json.get(13).and_then(|v| v.as_u64()).map(|v| v != 0).unwrap_or(false);
 
-            let han_shadow = json.get(10).and_then(|v| v.as_u64()).map(|v| v != 0);
-            let is_bold = json.get(11).and_then(|v| v.as_u64()).map(|v| v != 0);
-            let font_family = json.get(12).and_then(|v| v.as_str()).map(String::from);
-            let rotate = json.get(13).and_then(|v| v.as_f64());
-
-            Ok(Self {
+            Ok(Some(Self {
                 time,
                 mode: DanmakuMode::Advance {
                     x,
                     y,
                     gradient,
-                    last,
+                    duration,
                     end_x,
                     end_y,
-                    appearing_delay,
-                    disappearing_advanced,
-                    han_shadow,
-                    is_bold,
+                    z_rotate,
+                    y_rotate,
+                    move_duration,
+                    move_delay,
+                    stroke,
                     font_family,
-                    rotate,
+                    linear_speed_up,
                 },
                 font_size,
                 color,
-                weight,
                 text,
-            })
+            }))
         } else {
-            // 普通弹幕：content 就是纯文本
             let text = content_str.into_owned();
-            let mode = DanmakuMode::from_id(mode_id)?;
-
-            Ok(Self {
-                time,
-                mode,
-                font_size,
-                color,
-                weight,
-                text,
-            })
+            match DanmakuMode::from_id(mode_id) {
+                Some(mode) => Ok(Some(Self {
+                    time,
+                    mode,
+                    font_size,
+                    color,
+                    text,
+                })),
+                None => Ok(None),
+            }
         }
     }
 }
 
 #[derive(Debug, Clone)]
 enum DanmakuMode {
-    Normal,
-    Top,
+    Scroll,
     Bottom,
-    AdvanceUndecoded,
+    Top,
+    Reverse,
     Advance {
-        x: Option<f64>, // 取值：0~1, 含义：相对于播放器宽度的比例，0为最左
-        y: Option<f64>,
-        gradient: Option<OpacityGradient>,
-        last: Option<Duration>,
-        end_x: Option<f64>,
-        end_y: Option<f64>,
-        appearing_delay: Option<Duration>,
-        disappearing_advanced: Option<Duration>,
-        han_shadow: Option<bool>,
-        is_bold: Option<bool>,
-        font_family: Option<String>,
-        rotate: Option<f64>,
+        x: f64,
+        y: f64,
+        gradient: OpacityGradient,
+        duration: Duration,
+        end_x: f64,
+        end_y: f64,
+        z_rotate: f64,
+        y_rotate: f64,
+        move_duration: Duration,
+        move_delay: Duration,
+        stroke: bool,
+        font_family: String,
+        linear_speed_up: bool,
     },
+    Bas,
 }
 
 impl DanmakuMode {
-    fn from_id(id: usize) -> anyhow::Result<Self> {
+    fn from_id(id: usize) -> Option<Self> {
         match id {
-            1 => Ok(Self::Normal),
-            5 => Ok(Self::Top),
-            4 => Ok(Self::Bottom),
-            7 => Ok(Self::AdvanceUndecoded),
-            _ => bail!("不支持的弹幕类型id: {id}（仅支持 1=滚动, 4=底端, 5=顶端, 7=高级）"),
+            1 | 2 | 3 => Some(Self::Scroll),
+            4 => Some(Self::Bottom),
+            5 => Some(Self::Top),
+            6 => Some(Self::Reverse),
+            9 => Some(Self::Bas),
+            _ => None,
         }
     }
 }
