@@ -2,17 +2,24 @@
 name = "bili_add_on"
 version = "0.1.0"
 edition = "2024"
+description = "为视频叠加B站弹幕（danmaku）的命令行工具，支持从B站视频ID自动获取弹幕XML或指定本地弹幕文件"
+license = "MIT"
+repository = "https://github.com/ordinaryday-my/bili_add_on"
+keywords = ["bilibili", "danmaku", "video", "overlay", "cli"]
+categories = ["command-line-utilities", "multimedia::video"]
 
 [dependencies]
 anyhow = "1.0.103"
 clap = { version = "4.6.1", features = ["derive"] }
 image = "0.25.10"
-imageproc = "0.27.0"
+imageproc = { version = "0.27.0", features = ["text"] }
+ab_glyph = "0.2"
 quick-xml = "0.41.0"
 regex = "1.13.0"
 reqwest = { version = "0.13.4", features = ["blocking", "gzip", "brotli"] }
 flate2 = "1.0"
-rusttype = "0.9.3"
-video-rs = "0.11.0"
+video-rs = { version = "0.11.0", features = ["ndarray"]}
 serde_json = "1.0.140"
 encoding_rs = "0.8.35"
+ndarray = "0.17.2"
+itertools = "0.15.0"
