@@ -1,0 +1,30 @@
+# 编译产物
+target/
+*.exe
+*.dll
+*.so
+*.dylib
+*.obj
+*.pdb
+*.log
+
+# 资源素材（图片/视频/大字体/FFmpeg静态库等！你大概率带了静态二进制）
+assets/*.png
+assets/*.jpg
+assets/*.mp4
+font/*.ttf
+*.zip
+*.7z
+
+# IDE、git、本地配置
+.git/
+.gitignore
+.vscode/
+.idea/
+*.md.bak
+tmp/
+examples/big_test_media/
+
+# 开发脚本、测试大文件
+test_data/
+bench_data/
