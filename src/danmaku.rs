@@ -10,7 +10,7 @@ use quick_xml::{
 
 use crate::{
     utils::{cow_u8_to_str, decode_bytes, decode_rgb},
-    web::{fetch_bili_vedio_page, get_cid, get_danmaku_xml},
+    web::{get_cid_from_api, get_danmaku_xml},
 };
 
 pub fn parse_danmakus(xml: String) -> anyhow::Result<Vec<Danmaku>> {
@@ -21,22 +21,27 @@ pub fn parse_danmakus(xml: String) -> anyhow::Result<Vec<Danmaku>> {
     let mut danmakus = Vec::new();
 
         loop {
-            match reader.read_event_into(&mut buf)? {
+            match reader.read_event_into(&mut buf)
+                .with_context(|| "XML 解析失败（非法的 XML 标签或属性）")? {
                 Event::Start(ref s) if s.name().as_ref() == b"d" => {
                     let p_attr = s
                         .attributes()
                         .flatten()
                         .find(|attr: &Attribute<'_>| attr.key.as_ref() == b"p")
                         .map(|attr| attr.normalized_value(XmlVersion::Explicit1_1))
-                        .transpose()?
+                        .transpose()
+                        .with_context(|| "XML 属性规范化失败，p 属性值无法解码")?
                         .unwrap_or_default();
 
-                    let content = reader.read_text(s.name())?.into_inner();
+                    let content = reader.read_text(s.name())
+                        .with_context(|| "读取弹幕标签文本内容失败")?
+                        .into_inner();
 
                     let text_preview = {
                         let s = String::from_utf8_lossy(&content);
                         if s.len() > 60 {
-                            format!("{}...", &s[..60])
+                            let truncated: String = s.chars().take(60).collect();
+                            format!("{truncated}...")
                         } else {
                             s.into_owned()
                         }
@@ -330,9 +335,7 @@ impl OpacityGradient {
 }
 
 pub fn get_danmuku_xml_by_bili_id(id: &str) -> anyhow::Result<String> {
-    let page =
-        fetch_bili_vedio_page(id).with_context(|| format!("获取B站视频页面失败 (id: {id})"))?;
-    let cid = get_cid(&page).context("从B站视频页面中提取cid失败，B站页面结构可能已变更")?;
+    let cid = get_cid_from_api(id).with_context(|| format!("获取B站视频cid失败 (bvid: {id})"))?;
     let xml = get_danmaku_xml(cid).with_context(|| format!("获取弹幕xml失败 (cid: {cid})"))?;
 
     Ok(xml)

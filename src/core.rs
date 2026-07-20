@@ -1,27 +1,225 @@
-use std::{collections::HashSet, path::Path, time::Duration};
+use std::{
+    collections::HashSet,
+    path::Path,
+    time::Duration,
+};
 
 use ab_glyph::{FontVec, PxScale};
 use anyhow::{anyhow, Context, Result};
 use image::{ImageBuffer, Rgb, RgbImage};
 use imageproc::drawing::{draw_text_mut, text_size};
 use ndarray::Array3;
-use video_rs::{encode::Settings, Decoder, Encoder, Time};
+use ffmpeg_next as ffmpeg;
 
 use crate::{
     core::Direction::{ToLeft, ToRight},
     danmaku::{Danmaku, DanmakuMode},
+    decoder::VideoDecoder,
     interaction::Args,
     utils::{GrowableVec, Ignore},
 };
 
+pub(crate) struct FfmpegEncoder {
+    output: ffmpeg::format::context::Output,
+    encoder: ffmpeg::encoder::Video,
+    scaler: ffmpeg::software::scaling::context::Context,
+    ost_index: usize,
+    encoder_time_base: ffmpeg::Rational,
+    src_frame: ffmpeg::frame::Video,
+    dst_frame: ffmpeg::frame::Video,
+    frame_count: u64,
+}
+
+impl FfmpegEncoder {
+    fn new(path: &Path, width: u32, height: u32, frame_rate: f32) -> Result<Self> {
+        let mut octx = ffmpeg::format::output(path)
+            .with_context(|| format!("创建视频输出文件失败: {}", path.display()))?;
+
+        let codec = ffmpeg::encoder::find_by_name("libx264")
+            .or_else(|| ffmpeg::encoder::find(ffmpeg::codec::Id::H264))
+            .context("找不到可用的 H.264 编码器（libx264），请确认 ffmpeg 安装完整")?;
+
+        let global_header = octx.format().flags()
+            .contains(ffmpeg::format::flag::Flags::GLOBAL_HEADER);
+
+        let mut ost = octx.add_stream(codec.clone())
+            .context("添加视频流到输出文件失败")?;
+        let ost_index = ost.index();
+
+        let ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
+        let mut encoder = ctx.encoder().video()
+            .context("创建视频编码器上下文失败")?;
+
+        encoder.set_width(width);
+        encoder.set_height(height);
+        encoder.set_format(ffmpeg::util::format::Pixel::YUV420P);
+        encoder.set_frame_rate(Some((frame_rate.round() as i32, 1)));
+        encoder.set_time_base(ffmpeg::util::mathematics::rescale::TIME_BASE);
+
+        if global_header {
+            encoder.set_flags(ffmpeg::codec::flag::Flags::GLOBAL_HEADER);
+        }
+
+        let encoder = encoder.open()
+            .map_err(|e| anyhow!("打开 H.264 编码器失败: {e:?}"))?;
+        let encoder_time_base = encoder.time_base();
+
+        ost.set_parameters(&encoder);
+
+        let scaler = ffmpeg::software::scaling::context::Context::get(
+            ffmpeg::util::format::Pixel::RGB24,
+            width,
+            height,
+            ffmpeg::util::format::Pixel::YUV420P,
+            width,
+            height,
+            ffmpeg::software::scaling::flag::Flags::empty(),
+        ).context("创建像素格式转换器失败（RGB → YUV420P）")?;
+
+        let src_frame = ffmpeg::frame::Video::new(
+            ffmpeg::util::format::Pixel::RGB24,
+            width,
+            height,
+        );
+
+        let mut dst_frame = ffmpeg::frame::Video::new(
+            ffmpeg::util::format::Pixel::YUV420P,
+            width,
+            height,
+        );
+        unsafe {
+            ffmpeg::ffi::av_frame_get_buffer(dst_frame.as_mut_ptr(), 0);
+        }
+
+        octx.write_header()
+            .context("写入输出文件头失败")?;
+
+        Ok(Self {
+            output: octx,
+            encoder,
+            scaler,
+            ost_index,
+            encoder_time_base,
+            src_frame,
+            dst_frame,
+            frame_count: 0,
+        })
+    }
+
+    fn encode(&mut self, ndarray_frame: &Array3<u8>, timestamp_secs: f64) -> Result<()> {
+        let (height, width, _channels) = ndarray_frame.dim();
+        let layout = ndarray_frame.as_standard_layout();
+        let slice = layout
+            .as_slice()
+            .context("帧数据不连续，无法转换为编码器输入格式")?;
+
+        unsafe {
+            ffmpeg::ffi::av_image_fill_arrays(
+                (*self.src_frame.as_mut_ptr()).data.as_mut_ptr(),
+                (*self.src_frame.as_mut_ptr()).linesize.as_mut_ptr(),
+                slice.as_ptr(),
+                ffmpeg::util::format::Pixel::RGB24.into(),
+                width as i32,
+                height as i32,
+                1,
+            );
+        }
+        self.src_frame.set_width(width as u32);
+        self.src_frame.set_height(height as u32);
+
+        let tb_num = self.encoder_time_base.numerator() as f64;
+        let tb_den = self.encoder_time_base.denominator() as f64;
+        let pts = (timestamp_secs * tb_den / tb_num).round() as i64;
+        self.src_frame.set_pts(Some(pts));
+
+        self.scaler.run(&self.src_frame, &mut self.dst_frame)
+            .context("帧像素格式缩放失败")?;
+        self.dst_frame.set_pts(Some(pts));
+
+        if self.frame_count % 12 == 0 {
+            self.dst_frame.set_kind(ffmpeg::util::picture::Type::I);
+        }
+
+        self.frame_count += 1;
+
+        self.encoder.send_frame(&self.dst_frame)
+            .context("发送帧到 H.264 编码器失败")?;
+
+        self.receive_and_write()
+            .with_context(|| format!("接收并写入编码包失败 (帧 #{})", self.frame_count))?;
+
+        Ok(())
+    }
+
+    fn receive_and_write(&mut self) -> Result<()> {
+        let ost_time_base = self
+            .output
+            .stream(self.ost_index)
+            .context("获取输出流时基失败")?
+            .time_base();
+
+        loop {
+            let mut packet = ffmpeg::codec::packet::Packet::empty();
+            match self.encoder.receive_packet(&mut packet) {
+                Ok(()) => {
+                    packet.set_stream(self.ost_index);
+                    packet.set_position(-1);
+                    packet.rescale_ts(self.encoder_time_base, ost_time_base);
+                    packet
+                        .write(&mut self.output)
+                        .context("写入编码包到输出文件失败")?;
+                }
+                Err(ffmpeg::Error::Other { errno })
+                    if errno == ffmpeg::util::error::EAGAIN => break,
+                Err(ffmpeg::Error::Eof) => break,
+                Err(e) => return Err(anyhow!("编码器接收包错误: {e}")),
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<()> {
+        self.encoder.send_eof()
+            .context("编码器发送 EOF 信号失败")?;
+
+        let ost_time_base = self
+            .output
+            .stream(self.ost_index)
+            .context("获取输出流时基失败")?
+            .time_base();
+
+        loop {
+            let mut packet = ffmpeg::codec::packet::Packet::empty();
+            match self.encoder.receive_packet(&mut packet) {
+                Ok(()) => {
+                    packet.set_stream(self.ost_index);
+                    packet.set_position(-1);
+                    packet.rescale_ts(self.encoder_time_base, ost_time_base);
+                    packet
+                        .write(&mut self.output)
+                        .context("写入最终编码包失败")?;
+                }
+                Err(ffmpeg::Error::Other { errno })
+                    if errno == ffmpeg::util::error::EAGAIN => break,
+                Err(ffmpeg::Error::Eof) => break,
+                Err(e) => return Err(anyhow!("编码器最终收包错误: {e}")),
+            }
+        }
+
+        self.output.write_trailer()
+            .context("写入输出文件尾失败")?;
+
+        Ok(())
+    }
+}
+
 pub fn video_process(
-    mut decoder: Decoder,
-    mut encoder: Encoder,
+    mut decoder: VideoDecoder,
+    mut encoder: FfmpegEncoder,
     mut danmakus: Vec<Danmaku>,
     args: &Args,
-    frame_durtion: Time,
+    frame_duration_secs: f64,
 ) -> Result<()> {
-    // let advance_singlation = DanmakuMode::advance();
     let (video_width, video_height) = decoder.size();
     let gap = args.line_spacing;
     let area_top = (video_height as f64 * args.top_ratio) as u32;
@@ -41,21 +239,21 @@ pub fn video_process(
     let regular = FontVec::try_from_vec(SOURCE_FONT.to_vec())
         .expect("内置字体加载失败: SourceHanSansSC-Regular-2.otf，字体文件可能已损坏或不存在");
 
-    for decode in decoder.decode_iter() {
-        let (ts, frame) = match decode {
-            Ok(res) => res,
-            Err(video_rs::Error::DecodeExhausted) => break,
-            r => r?,
+    let mut frame_count = 0u64;
+    let total_frames = decoder.frame_count();
+
+    loop {
+        let (ts_secs, frame) = match decoder.next_frame()? {
+            Some(res) => res,
+            None => break,
         };
-        let mut image = array3_to_rgb_image(&frame)?;
-        let dur = time_to_duration(ts);
+        let dur = Duration::from_secs_f64(ts_secs);
 
-        // #region 每帧处理
+        let mut image = array3_to_rgb_image(&frame)
+            .with_context(|| format!("帧数据转换为RGB图像失败 (时间戳: {ts_secs})"))?;
 
-        // 找到在当前时间需要显示的弹幕
-        let enqueue = danmakus.extract_if(.., |d| d.time <= time_to_duration(ts));
+        let enqueue = danmakus.extract_if(.., |d| d.time <= dur);
 
-        // 分类加入slots
         for d in enqueue {
             let scale = PxScale::from(d.font_size as f32);
             let (width, height) = text_size(scale, &regular, &d.text);
@@ -63,7 +261,7 @@ pub fn video_process(
                 DanmakuMode::Scroll | DanmakuMode::Reverse => {
                     let travel_frames = (width + video_width).div_ceil(args.speed);
                     dur + Duration::from_secs_f64(
-                        travel_frames as f64 * frame_durtion.as_secs_f64(),
+                        travel_frames as f64 * frame_duration_secs,
                     )
                 }
                 DanmakuMode::Top | DanmakuMode::Bottom => {
@@ -120,18 +318,15 @@ pub fn video_process(
                         },
                     ))
                     .ignore(),
-                _ => (), // 忽略Advance和Bds
+                _ => (),
             };
         }
 
-        // 处理元素删除
         del_dead(&mut scroll_slots, dur);
         del_dead(&mut reverse_slots, dur);
         del_dead(&mut top_slots, dur);
         del_dead(&mut bottom_slots, dur);
 
-        // 绘制文字
-        // 绘制滚动弹幕
         draw_scroll_danmukus(
             &mut image,
             &mut scroll_slots,
@@ -154,7 +349,6 @@ pub fn video_process(
             ToRight,
             args.opacity,
         );
-        // 滚动弹幕移动
         scroll(
             scroll_slots
                 .iter_mut()
@@ -194,16 +388,22 @@ pub fn video_process(
             false,
             args.opacity,
         );
-        // 记得font-size要乘ratio
 
-        // #endregion
         let video_frame = rgb_image_to_array3(&image);
         encoder
-            .encode(&video_frame, ts)
-            .with_context(|| format!("编码帧失败 (时间戳: {ts:?})"))?;
+            .encode(&video_frame, ts_secs)
+            .with_context(|| format!("编码帧失败 (时间戳: {ts_secs})"))?;
+        frame_count += 1;
+        if !args.quiet {
+            render_progress(frame_count, total_frames);
+        }
     }
 
-    encoder.finish()?;
+    if !args.quiet {
+        eprintln!(); // finalize progress bar line
+    }
+
+    encoder.finish().context("编码器完成写入失败（输出文件不可用）")?;
 
     Ok(())
 }
@@ -283,12 +483,11 @@ fn draw_fixed_danmukus(
             font,
             &dan.text,
         );
-        // 插入修改y序列
         ensure_y_q.push((idx, y));
     }
 
     for (idx, y) in ensure_y_q {
-        fixed_slots[idx].as_mut().unwrap().1.y = Some(y); // 该unwrap由上一个循环的filter保证
+        fixed_slots[idx].as_mut().unwrap().1.y = Some(y);
     }
 }
 
@@ -409,12 +608,11 @@ fn draw_scroll_danmukus(
             font,
             &dan.text,
         );
-        // 插入修改y序列
         ensure_y_q.push((idx, y));
     }
 
     for (idx, y) in ensure_y_q {
-        scroll_slots[idx].as_mut().unwrap().1.y = Some(y); // 该unwrap由上一个循环的filter保证
+        scroll_slots[idx].as_mut().unwrap().1.y = Some(y);
     }
 }
 
@@ -446,52 +644,22 @@ struct NormalComponent {
     dead_line: Duration,
 }
 
-// /// 将 DynamicImage 转为 video-rs 所需 Array3<u8>
-// pub fn dyn_img_to_video_array(img: DynamicImage) -> Array3<u8> {
-//     let (width, height) = (img.width() as usize, img.height() as usize);
-//     let rgb = img.into_rgb8();
-//     Array3::from_shape_vec((height, width, 3), rgb.into_raw()).expect("图片像素数据长度不匹配尺寸")
-// }
-
-// pub fn frame_to_dynamic_image(array: &Array3<u8>) -> Option<DynamicImage> {
-//     let (height, width, _) = array.dim();
-//     let raw_pixels = array.as_slice()?;
-//     ImageBuffer::from_raw(width as u32, height as u32, raw_pixels.to_vec())
-//         .map(DynamicImage::ImageRgb8)
-// }
-
 pub fn same_specifications(
-    decoder: &Decoder,
+    decoder: &VideoDecoder,
     path: impl AsRef<Path>,
-) -> anyhow::Result<(Encoder, Time)> {
+) -> anyhow::Result<(FfmpegEncoder, f64)> {
     let path = path.as_ref();
 
     let (width, height) = decoder.size();
-
-    let settings = Settings::preset_h264_yuv420p(width as usize, height as usize, false);
-
-    let encoder = Encoder::new(path, settings)?;
-
     let frame_rate = decoder.frame_rate();
-    let frame_duration = Time::from_secs_f64(1.0 / frame_rate as f64);
+    let encoder = FfmpegEncoder::new(path, width, height, frame_rate)?;
 
-    Ok((encoder, frame_duration))
+    let frame_duration_secs = 1.0 / frame_rate as f64;
+
+    Ok((encoder, frame_duration_secs))
 }
 
-fn time_to_duration(t: Time) -> Duration {
-    let s = t.as_secs_f64();
-    Duration::from_secs_f64(s)
-}
-
-/// 将 RGB 格式的 Array3<u8> 转换为 image 库的 RgbImage。
-///
-/// # 参数
-/// - `array`: 形状应为 `(height, width, 3)` 的数组，数据连续且按行优先存储。
-///
-/// # 返回
-/// 成功时返回 `RgbImage`，否则返回错误。
 pub fn array3_to_rgb_image(array: &Array3<u8>) -> Result<RgbImage> {
-    // 检查维度是否正确
     let (height, width, channels) = array.dim();
     if channels != 3 {
         return Err(anyhow!(
@@ -499,14 +667,11 @@ pub fn array3_to_rgb_image(array: &Array3<u8>) -> Result<RgbImage> {
         ));
     }
 
-    // 确保数据是连续存储的，并获取切片
     let layout = array.as_standard_layout();
     let slice = layout
         .as_slice()
         .ok_or_else(|| anyhow!("视频帧数据不连续或使用了非标准内存布局，无法转换为图像"))?;
 
-    // 使用 from_vec 创建图像，它会进行数据拷贝（如果需要）
-    // 注意：from_vec 要求数据长度 == width * height * 3
     let img = ImageBuffer::from_vec(width as u32, height as u32, slice.to_vec())
         .ok_or_else(|| {
             anyhow!(
@@ -517,19 +682,28 @@ pub fn array3_to_rgb_image(array: &Array3<u8>) -> Result<RgbImage> {
     Ok(img)
 }
 
-/// 将 image 库的 RgbImage 转换为 RGB 格式的 Array3<u8>。
-///
-/// # 参数
-/// - `img`: 一个 RgbImage 实例。
-///
-/// # 返回
-/// 形状为 `(height, width, 3)` 的 Array3。
 pub fn rgb_image_to_array3(img: &RgbImage) -> Array3<u8> {
     let (width, height) = img.dimensions();
-    let raw_pixels = img.as_raw(); // 这是一个 &[u8]，长度为 width*height*3
+    let raw_pixels = img.as_raw();
 
-    // 将切片转换为 Vec，然后构建 Array3
-    // 注意：ImageBuffer 的数据是连续的，且按行优先存储
     Array3::from_shape_vec((height as usize, width as usize, 3), raw_pixels.to_vec())
         .expect("图像转视频帧失败：尺寸不匹配，像素数据长度与维度 (height×width×3) 不一致")
+}
+
+fn render_progress(current: u64, total: u64) {
+    const BAR_WIDTH: usize = 30;
+
+    if total == 0 {
+        eprint!("\r正在渲染弹幕... 已处理 {current} 帧");
+    } else {
+        let pct = (current as f64 / total as f64 * 100.0) as u32;
+        let filled = ((BAR_WIDTH as f64 * current as f64 / total as f64) as usize).min(BAR_WIDTH);
+        let empty = BAR_WIDTH - filled;
+        eprint!(
+            "\r[{}{}] {:>3}% ({current}/{total})",
+            "█".repeat(filled),
+            "░".repeat(empty),
+            pct,
+        );
+    }
 }

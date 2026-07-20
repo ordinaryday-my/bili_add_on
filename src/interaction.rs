@@ -18,7 +18,7 @@ pub struct Args {
     #[command(flatten)]
     pub source: DanmakuSource,
 
-    #[arg(long, default_value_t = 0.5, help = "弹幕不透明度，取值范围 0~1")]
+    #[arg(long, default_value_t = 0.93, help = "弹幕不透明度，取值范围 0~1")]
     pub opacity: f64,
 
     #[arg(
@@ -48,6 +48,12 @@ pub struct Args {
 
     #[arg(long, default_value_t = 5.0, help = "固定弹幕的持续时间（秒）")]
     pub fixed_duration: f64,
+
+    #[arg(long, default_value_t = false, help = "不保留输入视频的音频轨道")]
+    pub no_audio: bool,
+
+    #[arg(long, short, default_value_t = false, help = "静默模式，不输出进度提示")]
+    pub quiet: bool,
 }
 
 impl Args {

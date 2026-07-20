@@ -1,28 +1,32 @@
 use anyhow::{Context, anyhow, bail};
 use crate::utils::decode_bytes;
 
-pub fn get_cid(page: &str) -> anyhow::Result<&str> {
-    let re = regex::Regex::new(r#""cid":(\d+)"#).context("编译cid提取用正则表达式失败")?;
-    let capss = re
-        .captures_iter(page);
+pub fn get_cid_from_api(bvid: &str) -> anyhow::Result<u64> {
+    let url = format!("https://api.bilibili.com/x/web-interface/view?bvid={bvid}");
+    let text = client()?
+        .get(&url)
+        .send()
+        .with_context(|| format!("HTTP 请求 B站 API 失败: {url}"))?
+        .text()
+        .with_context(|| format!("读取 B站 API 响应失败 (bvid: {bvid})"))?;
+    let resp: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("解析 B站 API 响应 JSON 失败 (bvid: {bvid})"))?;
 
-    for caps in capss {
-        match caps.get(1) {
-            Some(m) => {
-                let s = m.as_str();
-                if s.parse::<i64>().is_err() {
-                    continue;
-                }
-                return Ok(s)
-            },
-            None => bail!("cid正则已匹配但无法提取数字捕获组，正则执行结果异常"),
-        };
-    } 
+    let code = resp["code"]
+        .as_i64()
+        .ok_or_else(|| anyhow!("B站 API 响应中缺少 code 字段 (bvid: {bvid})"))?;
 
-    Err(anyhow!("B站视频页面中未找到cid信息（可能页面结构已变更）"))
+    if code != 0 {
+        let msg = resp["message"].as_str().unwrap_or("未知错误");
+        bail!("B站 API 返回错误 (bvid: {bvid}, code: {code}, message: {msg})");
+    }
+
+    resp["data"]["cid"]
+        .as_u64()
+        .ok_or_else(|| anyhow!("B站 API 响应中未找到 data.cid 字段 (bvid: {bvid})"))
 }
 
-pub fn get_danmaku_xml(cid: &str) -> anyhow::Result<String> {
+pub fn get_danmaku_xml(cid: u64) -> anyhow::Result<String> {
     let url = format!("https://comment.bilibili.com/{cid}.xml");
     let response = client()?
         .get(&url)
@@ -63,17 +67,6 @@ pub fn maybe_decompress(data: &[u8]) -> anyhow::Result<Vec<u8>> {
 
     // Not compressed, return as-is
     Ok(data.to_vec())
-}
-
-pub fn fetch_bili_vedio_page(id: &str) -> anyhow::Result<String> {
-    let url = format!("https://www.bilibili.com/video/{id}");
-    let text = client()?
-        .get(&url)
-        .send()
-        .with_context(|| format!("HTTP请求B站视频页面失败: {url}"))?
-        .text()
-        .with_context(|| format!("读取B站视频页面响应失败 (id: {id})"))?;
-    Ok(text)
 }
 
 fn client() -> anyhow::Result<&'static reqwest::blocking::Client> {

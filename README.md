@@ -43,6 +43,7 @@ bili_add_on --input input.mp4 --xml danmaku.xml
 | `--speed` | `-s` | `3` | 弹幕滚动速度（像素每帧） |
 | `--line-spacing` | | `4` | 弹幕行间距（像素） |
 | `--fixed-duration` | | `5.0` | 固定弹幕（顶部/底部）的持续时间（秒） |
+| `--no-audio` | | `false` | 不保留输入视频的音频轨道（输出仅含画面） |
 
 ### 弹幕区域控制
 
@@ -75,7 +76,9 @@ bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx --top-ratio 0.0 --bottom-rati
 ## 输出格式
 
 - 视频编码：H.264 (YUV420p)
+- 默认保留输入视频的所有音频轨道（流拷贝，无质量损失）
 - 输出文件默认命名规则：`bili_add_on_<源文件名>`
+- 使用 `--no-audio` 可输出纯视频文件
 
 ## 许可证
 
