@@ -23,12 +23,12 @@ pub fn video_process(
 ) -> Result<()> {
     // let advance_singlation = DanmakuMode::advance();
     let (video_width, video_height) = decoder.size();
-    let gap = args.line_gap;
-    let area_top = (video_height as f64 * args.upper_limit) as u32;
-    let area_bottom = (video_height as f64 * args.lower_limit) as u32;
+    let gap = args.line_spacing;
+    let area_top = (video_height as f64 * args.top_ratio) as u32;
+    let area_bottom = (video_height as f64 * args.bottom_ratio) as u32;
     let area_height = area_bottom - area_top;
 
-    let base_font_size = args.font_size_ratio * 25.0;
+    let base_font_size = args.font_scale * 25.0;
     let line_height = base_font_size as u32 + gap;
     let rail_cnt = area_height / line_height;
 
@@ -67,7 +67,7 @@ pub fn video_process(
                     )
                 }
                 DanmakuMode::Top | DanmakuMode::Bottom => {
-                    dur + Duration::from_secs_f64(args.fixed_last)
+                    dur + Duration::from_secs_f64(args.fixed_duration)
                 }
                 _ => Duration::from_millis(0),
             };
@@ -138,7 +138,7 @@ pub fn video_process(
             &regular,
             line_height,
             rail_cnt,
-            args.font_size_ratio,
+            args.font_scale,
             area_top as i64,
             ToLeft,
             args.opacity,
@@ -149,7 +149,7 @@ pub fn video_process(
             &regular,
             line_height,
             rail_cnt,
-            args.font_size_ratio,
+            args.font_scale,
             area_top as i64,
             ToRight,
             args.opacity,
@@ -178,7 +178,7 @@ pub fn video_process(
             &regular,
             line_height,
             rail_cnt,
-            args.font_size_ratio,
+            args.font_scale,
             area_top as i64,
             true,
             args.opacity,
@@ -189,7 +189,7 @@ pub fn video_process(
             &regular,
             line_height,
             rail_cnt,
-            args.font_size_ratio,
+            args.font_scale,
             area_top as i64,
             false,
             args.opacity,

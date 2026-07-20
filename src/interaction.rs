@@ -5,8 +5,8 @@ use anyhow::{Context, anyhow, bail};
 #[derive(Debug, Parser)]
 #[command(version, author, about)]
 pub struct Args {
-    #[arg(long, help = "视频源文件路径")]
-    pub path: PathBuf,
+    #[arg(long, short, help = "输入视频文件路径")]
+    pub input: PathBuf,
 
     #[arg(
         long,
@@ -27,7 +27,7 @@ pub struct Args {
         default_value_t = 0.0,
         help = "弹幕显示区域上界与画面高度的比值，0 为顶端"
     )]
-    pub upper_limit: f64,
+    pub top_ratio: f64,
 
     #[arg(
         long,
@@ -35,32 +35,32 @@ pub struct Args {
         default_value_t = 1.0,
         help = "弹幕显示区域下界与画面高度的比值，1 为底端"
     )]
-    pub lower_limit: f64,
+    pub bottom_ratio: f64,
 
     #[arg(long, default_value_t = 1.0, help = "弹幕字号缩放比")]
-    pub font_size_ratio: f32,
+    pub font_scale: f32,
 
-    #[arg(long, default_value_t = 3, help = "弹幕滚动速度（像素每帧）")]
+    #[arg(long, short, default_value_t = 3, help = "弹幕滚动速度（像素每帧）")]
     pub speed: u32,
 
-    #[arg(long, default_value_t = 4)]
-    pub line_gap: u32,
+    #[arg(long, default_value_t = 4, help = "弹幕行间距（像素）")]
+    pub line_spacing: u32,
 
-    #[arg(long, default_value_t = 5.0, help = "固定弹幕的持续时间(秒)")]
-    pub fixed_last: f64,
+    #[arg(long, default_value_t = 5.0, help = "固定弹幕的持续时间（秒）")]
+    pub fixed_duration: f64,
 }
 
 impl Args {
     pub fn check(&self) -> anyhow::Result<()> {
-        if !self.path.exists() {
-            bail!("视频源不存在: {}", self.path.display());
+        if !self.input.exists() {
+            bail!("视频源不存在: {}", self.input.display());
         }
 
-        if self.path.is_dir() {
-            bail!("不能输入目录（视频源）: {}", self.path.display());
+        if self.input.is_dir() {
+            bail!("不能输入目录（视频源）: {}", self.input.display());
         }
 
-        if let Some(p) = &self.source.danmaku_file {
+        if let Some(p) = &self.source.xml {
             if !p.exists() {
                 bail!("弹幕文件不存在: {}", p.display());
             }
@@ -80,21 +80,21 @@ impl Args {
         }
 
         if self
-            .lower_limit
-            .partial_cmp(&self.upper_limit)
+            .bottom_ratio
+            .partial_cmp(&self.top_ratio)
             .ok_or_else(|| {
                 anyhow!(
-                    "upper_limit ({}) 或 lower_limit ({}) 不是有效数值（可能为 NaN 或 Infinity）",
-                    self.upper_limit,
-                    self.lower_limit
+                    "top_ratio ({}) 或 bottom_ratio ({}) 不是有效数值（可能为 NaN 或 Infinity）",
+                    self.top_ratio,
+                    self.bottom_ratio
                 )
             })?
             != Ordering::Greater
         {
             bail!(
-                "lower_limit ({}) 必须大于 upper_limit ({})",
-                self.lower_limit,
-                self.upper_limit
+                "bottom_ratio ({}) 必须大于 top_ratio ({})",
+                self.bottom_ratio,
+                self.top_ratio
             );
         }
 
@@ -103,11 +103,11 @@ impl Args {
 
     pub fn check_output(&mut self) -> anyhow::Result<()> {
         if self.output.is_none() {
-            let mut from = self.path.clone();
+            let mut from = self.input.clone();
             let mut prefix = OsString::from("bili_add_on_");
             prefix.push(
                 from.file_name()
-                    .with_context(|| format!("无法从路径获取文件名: {}", self.path.display()))?,
+                    .with_context(|| format!("无法从路径获取文件名: {}", self.input.display()))?,
             );
             from.set_file_name(prefix);
 
@@ -123,11 +123,10 @@ impl Args {
 pub struct DanmakuSource {
     #[arg(
         long,
-        short,
         help = "B站视频 ID（如 BV1fRNH6kEra），将自动拉取对应弹幕"
     )]
-    pub bili_id: Option<String>,
+    pub bvid: Option<String>,
 
-    #[arg(long, help = "本地弹幕 XML 文件路径")]
-    pub danmaku_file: Option<PathBuf>,
+    #[arg(long, short, help = "本地弹幕 XML 文件路径")]
+    pub xml: Option<PathBuf>,
 }

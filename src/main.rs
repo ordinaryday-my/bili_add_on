@@ -27,11 +27,11 @@ fn run() -> anyhow::Result<()> {
     args.check_output().context("生成默认输出路径失败（源文件名无效，无法自动拼接输出文件名）")?;
     let args = args;
 
-    let xml = if let Some(id) = &args.source.bili_id {
+    let xml = if let Some(id) = &args.source.bvid {
         get_danmuku_xml_by_bili_id(id)?
     } else {
-        let file = args.source.danmaku_file.as_ref().ok_or_else(|| {
-            anyhow!("弹幕来源为空，请通过 --bili-id 或 --danmaku-file 指定弹幕来源")
+        let file = args.source.xml.as_ref().ok_or_else(|| {
+            anyhow!("弹幕来源为空，请通过 --bvid 或 --xml 指定弹幕来源")
         })?;
         get_danmuku_xml_from_file(file)?
     };
@@ -41,8 +41,8 @@ fn run() -> anyhow::Result<()> {
         .map_err(|e| anyhow!("{e}"))
         .context("视频编解码器初始化失败，请确认 ffmpeg 已正确安装且版本兼容")?;
 
-    let decoder = video_rs::Decoder::new(args.path.clone())
-        .with_context(|| format!("视频解码器创建失败，无法解码源文件: {}", args.path.display()))?;
+    let decoder = video_rs::Decoder::new(args.input.clone())
+        .with_context(|| format!("视频解码器创建失败，无法解码源文件: {}", args.input.display()))?;
     let output_path = args.output.clone().unwrap();
     let (encoder, frame_duration) =
         same_specifications(&decoder, &output_path)
