@@ -260,13 +260,8 @@ pub fn video_process(
                 let Ok((ts_secs, dur, mut image)) = decode_r.recv() else {
                     break;
                 };
-                let intime_len = danmakus
-                    .iter()
-                    .rev()
-                    .take_while(|dan| dan.time <= dur)
-                    .count();
-                let len = danmakus.len();
-                let enqueue = danmakus.drain((len - intime_len)..len).rev();
+                let ready_idx = danmakus.partition_point(|dan| dan.time > dur);
+                let enqueue = danmakus.drain(ready_idx..).rev();
 
                 for d in enqueue {
                     let scale = PxScale::from((d.font_size as f32) * args.font_scale);
@@ -341,28 +336,18 @@ pub fn video_process(
                 del_dead(&mut top_slots, dur);
                 del_dead(&mut bottom_slots, dur);
 
-                draw_scroll_danmukus(
-                    &mut image,
-                    &mut scroll_slots,
-                    &regular,
+                let mut draw_params = DrawParams {
+                    image: &mut image,
+                    font: &regular,
                     line_height,
                     rail_cnt,
-                    args.font_scale,
-                    area_top as i64,
-                    ToLeft,
-                    args.opacity,
-                );
-                draw_scroll_danmukus(
-                    &mut image,
-                    &mut reverse_slots,
-                    &regular,
-                    line_height,
-                    rail_cnt,
-                    args.font_scale,
-                    area_top as i64,
-                    ToRight,
-                    args.opacity,
-                );
+                    font_scale: args.font_scale,
+                    area_top: area_top as i64,
+                    opacity: args.opacity,
+                };
+
+                draw_scroll_danmukus(&mut draw_params, &mut scroll_slots, ToLeft);
+                draw_scroll_danmukus(&mut draw_params, &mut reverse_slots, ToRight);
                 scroll(
                     scroll_slots
                         .iter_mut()
@@ -380,28 +365,8 @@ pub fn video_process(
                     args.speed,
                 );
 
-                draw_fixed_danmukus(
-                    &mut image,
-                    &mut top_slots,
-                    &regular,
-                    line_height,
-                    rail_cnt,
-                    args.font_scale,
-                    area_top as i64,
-                    true,
-                    args.opacity,
-                );
-                draw_fixed_danmukus(
-                    &mut image,
-                    &mut bottom_slots,
-                    &regular,
-                    line_height,
-                    rail_cnt,
-                    args.font_scale,
-                    area_top as i64,
-                    false,
-                    args.opacity,
-                );
+                draw_fixed_danmukus(&mut draw_params, &mut top_slots, true);
+                draw_fixed_danmukus(&mut draw_params, &mut bottom_slots, false);
 
                 encode_s
                     .send((image, ts_secs))
@@ -458,38 +423,42 @@ pub fn video_process(
     Ok(())
 }
 
-fn draw_fixed_danmukus(
-    image: &mut RgbImage,
-    fixed_slots: &mut GrowableVec<Option<(Danmaku, NormalComponent)>>,
-    font: &FontVec,
+struct DrawParams<'a> {
+    image: &'a mut RgbImage,
+    font: &'a FontVec,
     line_height: u32,
     rail_cnt: u32,
-    font_size_ratio: f32,
+    font_scale: f32,
     area_top: i64,
-    to_bottom: bool,
     opacity: f64,
+}
+
+fn draw_fixed_danmukus(
+    params: &mut DrawParams,
+    fixed_slots: &mut GrowableVec<Option<(Danmaku, NormalComponent)>>,
+    to_bottom: bool,
 ) {
     const OFFSET: i64 = 1000;
     let cap = fixed_slots.len() + OFFSET as usize;
     let mut occupieds = BitSet::with_capacity(cap);
     let mut ensure_y_q = Vec::new();
-    let mut pending_y: Vec<i64> = Vec::new();
+    let mut pending_y: Vec<(i64, u32)> = Vec::new();
     for (idx, opt) in fixed_slots
         .iter()
         .enumerate()
         .filter(|(_, opt)| opt.is_some())
     {
         let (dan, comp) = opt.as_ref().unwrap();
-        let scale = PxScale::from(dan.font_size as f32 * font_size_ratio);
+        let scale = PxScale::from(dan.font_size as f32 * params.font_scale);
         if let Some(y) = comp.y {
-            let canvas_pos = (comp.x as i32, (y + area_top) as i32);
+            let canvas_pos = (comp.x as i32, (y + params.area_top) as i32);
             draw_text_mut(
-                image,
-                apply_opacity(dan.color, opacity),
+                params.image,
+                apply_opacity(dan.color, params.opacity),
                 canvas_pos.0,
                 canvas_pos.1,
                 scale,
-                font,
+                params.font,
                 &dan.text,
             );
             continue;
@@ -507,17 +476,21 @@ fn draw_fixed_danmukus(
 
         for (height, y) in raw_occupieds {
             occupieds.insert((y + OFFSET) as usize);
-            let extra_rails = height.div_ceil(line_height);
+            let extra_rails = height.div_ceil(params.line_height);
             for i in 1..extra_rails {
-                occupieds.insert(((y + i as i64 * line_height as i64) + OFFSET) as usize);
+                occupieds.insert(((y + i as i64 * params.line_height as i64) + OFFSET) as usize);
             }
         }
 
-        for &y in &pending_y {
+        for &(y, height) in &pending_y {
             occupieds.insert((y + OFFSET) as usize);
+            let extra_rails = height.div_ceil(params.line_height);
+            for i in 1..extra_rails {
+                occupieds.insert(((y + i as i64 * params.line_height as i64) + OFFSET) as usize);
+            }
         }
 
-        let rail_hs = rail_hs(line_height, rail_cnt);
+        let rail_hs = rail_hs(params.line_height, params.rail_cnt);
         let free = rail_hs.filter(|h| !occupieds.contains((h + OFFSET) as usize));
         let mut free: Box<dyn Iterator<Item = _>> = if to_bottom {
             Box::new(free)
@@ -532,17 +505,17 @@ fn draw_fixed_danmukus(
             Some(y) => y,
         };
 
-        let canvas_pos = (comp.x as i32, (y + area_top) as i32);
+        let canvas_pos = (comp.x as i32, (y + params.area_top) as i32);
         draw_text_mut(
-            image,
-            apply_opacity(dan.color, opacity),
+            params.image,
+            apply_opacity(dan.color, params.opacity),
             canvas_pos.0,
             canvas_pos.1,
             scale,
-            font,
+            params.font,
             &dan.text,
         );
-        pending_y.push(y);
+        pending_y.push((y, comp.height));
         ensure_y_q.push((idx, y));
         drop(free);
         occupieds.reset();
@@ -585,37 +558,31 @@ enum Direction {
 }
 
 fn draw_scroll_danmukus(
-    big_image: &mut RgbImage,
+    params: &mut DrawParams,
     scroll_slots: &mut GrowableVec<Option<(Danmaku, NormalComponent)>>,
-    font: &FontVec,
-    line_height: u32,
-    rail_cnt: u32,
-    font_size_ratio: f32,
-    area_top: i64,
     dir: Direction,
-    opacity: f64,
 ) {
     const OFFSET: i64 = 1000;
     let cap = scroll_slots.len() + OFFSET as usize;
     let mut occupieds = BitSet::with_capacity(cap);
     let mut ensure_y_q = Vec::new();
-    let mut pending_y: Vec<i64> = Vec::new();
+    let mut pending_y: Vec<(i64, u32)> = Vec::new();
     for (idx, opt) in scroll_slots
         .iter()
         .enumerate()
         .filter(|(_, opt)| opt.is_some())
     {
         let (dan, comp) = opt.as_ref().unwrap();
-        let scale = PxScale::from(dan.font_size as f32 * font_size_ratio);
+        let scale = PxScale::from(dan.font_size as f32 * params.font_scale);
         if let Some(y) = comp.y {
-            let canvas_pos = (comp.x as i32, (y + area_top) as i32);
+            let canvas_pos = (comp.x as i32, (y + params.area_top) as i32);
             draw_text_mut(
-                big_image,
-                apply_opacity(dan.color, opacity),
+                params.image,
+                apply_opacity(dan.color, params.opacity),
                 canvas_pos.0,
                 canvas_pos.1,
                 scale,
-                font,
+                params.font,
                 &dan.text,
             );
             continue;
@@ -632,7 +599,7 @@ fn draw_scroll_danmukus(
         });
 
         for (width, height, x, y) in raw_occupieds {
-            debug_assert_eq!(y % line_height as i64, 0);
+            debug_assert_eq!(y % params.line_height as i64, 0);
             match dir {
                 ToLeft => {
                     if width as i64 + x > comp.x {
@@ -649,17 +616,21 @@ fn draw_scroll_danmukus(
                     }
                 }
             }
-            let extra_rails = height.div_ceil(line_height);
+            let extra_rails = height.div_ceil(params.line_height);
             for i in 1..extra_rails {
-                occupieds.insert(((y + i as i64 * line_height as i64) + OFFSET) as usize);
+                occupieds.insert(((y + i as i64 * params.line_height as i64) + OFFSET) as usize);
             }
         }
 
-        for &y in &pending_y {
+        for &(y, height) in &pending_y {
             occupieds.insert((y + OFFSET) as usize);
+            let extra_rails = height.div_ceil(params.line_height);
+            for i in 1..extra_rails {
+                occupieds.insert(((y + i as i64 * params.line_height as i64) + OFFSET) as usize);
+            }
         }
 
-        let rail_hs = rail_hs(line_height, rail_cnt);
+        let rail_hs = rail_hs(params.line_height, params.rail_cnt);
         let mut free = rail_hs.filter(|h| !occupieds.contains((h + OFFSET) as usize));
 
         let y = match free.next() {
@@ -669,17 +640,17 @@ fn draw_scroll_danmukus(
             Some(y) => y,
         };
 
-        let canvas_pos = (comp.x as i32, (y + area_top) as i32);
+        let canvas_pos = (comp.x as i32, (y + params.area_top) as i32);
         draw_text_mut(
-            big_image,
-            apply_opacity(dan.color, opacity),
+            params.image,
+            apply_opacity(dan.color, params.opacity),
             canvas_pos.0,
             canvas_pos.1,
             scale,
-            font,
+            params.font,
             &dan.text,
         );
-        pending_y.push(y);
+        pending_y.push((y, comp.height));
         ensure_y_q.push((idx, y));
         drop(free);
         occupieds.reset();
@@ -726,6 +697,9 @@ pub fn same_specifications(
 
     let (width, height) = decoder.size();
     let frame_rate = decoder.frame_rate();
+    if frame_rate <= 0.0 {
+        return Err(anyhow!("视频帧率无效: {frame_rate}，无法确定每帧持续时间"));
+    }
     let encoder = FfmpegEncoder::new(path, width, height, frame_rate)?;
 
     let frame_duration_secs = 1.0 / frame_rate as f64;

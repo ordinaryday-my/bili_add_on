@@ -100,10 +100,11 @@ pub fn remux_audio(video_temp: &Path, original: &Path, output: &Path) -> Result<
     let ost_time_bases: Vec<ffmpeg::Rational> = (0..ost_count)
         .map(|i| {
             octx.stream(i)
-                .expect("无法获取输出流")
-                .time_base()
+                .with_context(|| format!("无法获取输出流 {i}"))
+                .map(|s| s.time_base())
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()
+        .context("获取输出流时基列表失败")?;
 
     for (stream, mut packet) in video_ictx.packets() {
         if let Some(&ost_index) = video_mapping.get(&stream.index()) {

@@ -24,7 +24,7 @@ encoding_rs = "0.8.35"
 tempfile = "3"
 log = "0.4"
 env_logger = "0.11"
-dhat = "0.3.3"
+dhat = { version = "0.3.3", optional = true }
 bit-set = "0.11.1"
 crossbeam-channel = "0.5.16"
 

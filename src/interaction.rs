@@ -111,6 +111,29 @@ impl Args {
             );
         }
 
+        if self.font_scale <= 0.0 {
+            bail!("font_scale 必须大于 0，当前值: {}", self.font_scale);
+        }
+
+        if self.speed == 0 {
+            bail!("speed 必须大于 0，当前值: {}", self.speed);
+        }
+
+        if self.fixed_duration <= 0.0 {
+            bail!(
+                "fixed_duration 必须大于 0，当前值: {}",
+                self.fixed_duration
+            );
+        }
+
+        if self.font_scale as f64 * 25.0 + self.line_spacing as f64 <= 0.0 {
+            bail!(
+                "font_scale ({}) * 25 + line_spacing ({}) 必须大于 0",
+                self.font_scale,
+                self.line_spacing
+            );
+        }
+
         Ok(())
     }
 
