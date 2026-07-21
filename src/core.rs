@@ -4,7 +4,7 @@ use ab_glyph::{FontVec, PxScale};
 use anyhow::{anyhow, Context, Result};
 use bit_set::BitSet;
 use crossbeam_channel::bounded;
-use image::{Rgb, RgbImage};
+use image::{RgbImage, Rgba, RgbaImage};
 use imageproc::drawing::{draw_text_mut, text_size};
 
 use ffmpeg_next as ffmpeg;
@@ -239,11 +239,21 @@ pub fn video_process(
     let total_frames = decoder.frame_count();
 
     thread::scope(move |s| -> Result<()> {
-        let (decode_s, decode_r) = bounded(500);
+        let (recycle_s, recycle_r) = bounded::<RgbImage>(3);
+        for _ in 0..3 {
+            recycle_s
+                .send(RgbImage::new(video_width, video_height))
+                .expect("初始化帧缓冲池失败");
+        }
+
+        let (decode_s, decode_r) = bounded(800);
         let decode_producer = s.spawn(move || -> Result<()> {
             loop {
-                let (ts_secs, image) = match decoder.next_frame()? {
-                    Some(res) => res,
+                let mut image = recycle_r
+                    .recv()
+                    .expect("帧回收通道异常关闭，编码线程可能已崩溃");
+                let ts_secs = match decoder.next_frame_into(&mut image)? {
+                    Some(ts) => ts,
                     None => break,
                 };
                 let dur = Duration::from_secs_f64(ts_secs);
@@ -254,7 +264,7 @@ pub fn video_process(
             Ok(())
         });
 
-        let (encode_s, encode_v) = bounded(500);
+        let (encode_s, encode_v) = bounded(800);
         let process_pipeline = s.spawn(move || -> Result<()> {
             loop {
                 let Ok((ts_secs, dur, mut image)) = decode_r.recv() else {
@@ -266,6 +276,17 @@ pub fn video_process(
                 for d in enqueue {
                     let scale = PxScale::from((d.font_size as f32) * args.font_scale);
                     let (width, height) = text_size(scale, &regular, &d.text);
+                    let color = d.color;
+                    let mut cached_text = RgbaImage::new(width, height);
+                    draw_text_mut(
+                        &mut cached_text,
+                        Rgba([color[0], color[1], color[2], 255]),
+                        0,
+                        0,
+                        scale,
+                        &regular,
+                        &d.text,
+                    );
                     let dead_line = match d.mode {
                         DanmakuMode::Scroll | DanmakuMode::Reverse => {
                             let travel_frames = (width + video_width).div_ceil(args.speed);
@@ -288,6 +309,7 @@ pub fn video_process(
                                     width,
                                     height,
                                     dead_line,
+                                    cached_text: Some(cached_text),
                                 },
                             ))
                             .ignore(),
@@ -300,6 +322,7 @@ pub fn video_process(
                                     width,
                                     height,
                                     dead_line,
+                                    cached_text: Some(cached_text),
                                 },
                             ))
                             .ignore(),
@@ -312,6 +335,7 @@ pub fn video_process(
                                     width,
                                     height,
                                     dead_line,
+                                    cached_text: Some(cached_text),
                                 },
                             ))
                             .ignore(),
@@ -324,6 +348,7 @@ pub fn video_process(
                                     width,
                                     height,
                                     dead_line,
+                                    cached_text: Some(cached_text),
                                 },
                             ))
                             .ignore(),
@@ -338,10 +363,8 @@ pub fn video_process(
 
                 let mut draw_params = DrawParams {
                     image: &mut image,
-                    font: &regular,
                     line_height,
                     rail_cnt,
-                    font_scale: args.font_scale,
                     area_top: area_top as i64,
                     opacity: args.opacity,
                 };
@@ -389,6 +412,7 @@ pub fn video_process(
                 encoder
                     .encode(&image, ts_secs)
                     .with_context(|| format!("编码帧失败 (时间戳: {ts_secs})"))?;
+                let _ = recycle_s.try_send(image);
             }
 
             if !args.quiet {
@@ -425,10 +449,8 @@ pub fn video_process(
 
 struct DrawParams<'a> {
     image: &'a mut RgbImage,
-    font: &'a FontVec,
     line_height: u32,
     rail_cnt: u32,
-    font_scale: f32,
     area_top: i64,
     opacity: f64,
 }
@@ -448,18 +470,14 @@ fn draw_fixed_danmukus(
         .enumerate()
         .filter(|(_, opt)| opt.is_some())
     {
-        let (dan, comp) = opt.as_ref().unwrap();
-        let scale = PxScale::from(dan.font_size as f32 * params.font_scale);
+        let (_dan, comp) = opt.as_ref().unwrap();
         if let Some(y) = comp.y {
-            let canvas_pos = (comp.x as i32, (y + params.area_top) as i32);
-            draw_text_mut(
+            blit_cached_text(
                 params.image,
-                apply_opacity(dan.color, params.opacity),
-                canvas_pos.0,
-                canvas_pos.1,
-                scale,
-                params.font,
-                &dan.text,
+                comp.cached_text.as_ref().unwrap(),
+                comp.x as i32,
+                (y + params.area_top) as i32,
+                params.opacity,
             );
             continue;
         }
@@ -500,20 +518,19 @@ fn draw_fixed_danmukus(
 
         let y = match free.next() {
             None => {
+                drop(free);
+                occupieds.reset();
                 continue;
             }
             Some(y) => y,
         };
 
-        let canvas_pos = (comp.x as i32, (y + params.area_top) as i32);
-        draw_text_mut(
+        blit_cached_text(
             params.image,
-            apply_opacity(dan.color, params.opacity),
-            canvas_pos.0,
-            canvas_pos.1,
-            scale,
-            params.font,
-            &dan.text,
+            comp.cached_text.as_ref().unwrap(),
+            comp.x as i32,
+            (y + params.area_top) as i32,
+            params.opacity,
         );
         pending_y.push((y, comp.height));
         ensure_y_q.push((idx, y));
@@ -572,18 +589,14 @@ fn draw_scroll_danmukus(
         .enumerate()
         .filter(|(_, opt)| opt.is_some())
     {
-        let (dan, comp) = opt.as_ref().unwrap();
-        let scale = PxScale::from(dan.font_size as f32 * params.font_scale);
+        let (_dan, comp) = opt.as_ref().unwrap();
         if let Some(y) = comp.y {
-            let canvas_pos = (comp.x as i32, (y + params.area_top) as i32);
-            draw_text_mut(
+            blit_cached_text(
                 params.image,
-                apply_opacity(dan.color, params.opacity),
-                canvas_pos.0,
-                canvas_pos.1,
-                scale,
-                params.font,
-                &dan.text,
+                comp.cached_text.as_ref().unwrap(),
+                comp.x as i32,
+                (y + params.area_top) as i32,
+                params.opacity,
             );
             continue;
         }
@@ -635,20 +648,19 @@ fn draw_scroll_danmukus(
 
         let y = match free.next() {
             None => {
+                drop(free);
+                occupieds.reset();
                 continue;
             }
             Some(y) => y,
         };
 
-        let canvas_pos = (comp.x as i32, (y + params.area_top) as i32);
-        draw_text_mut(
+        blit_cached_text(
             params.image,
-            apply_opacity(dan.color, params.opacity),
-            canvas_pos.0,
-            canvas_pos.1,
-            scale,
-            params.font,
-            &dan.text,
+            comp.cached_text.as_ref().unwrap(),
+            comp.x as i32,
+            (y + params.area_top) as i32,
+            params.opacity,
         );
         pending_y.push((y, comp.height));
         ensure_y_q.push((idx, y));
@@ -672,12 +684,45 @@ fn rail_hs(line_height: u32, rail_cnt: u32) -> impl Iterator<Item = i64> {
     })
 }
 
-fn apply_opacity(color: Rgb<u8>, opacity: f64) -> Rgb<u8> {
-    Rgb([
-        (color[0] as f64 * opacity) as u8,
-        (color[1] as f64 * opacity) as u8,
-        (color[2] as f64 * opacity) as u8,
-    ])
+fn blit_cached_text(frame: &mut RgbImage, sprite: &RgbaImage, x: i32, y: i32, opacity: f64) {
+    let o256 = (opacity * 256.0).round() as u32;
+    if o256 == 0 {
+        return;
+    }
+    let (sw, sh) = sprite.dimensions();
+    let (fw, fh) = frame.dimensions();
+    let clip_x1 = x.max(0) as u32;
+    let clip_y1 = y.max(0) as u32;
+    let clip_x2 = ((x + sw as i32).max(0) as u32).min(fw);
+    let clip_y2 = ((y + sh as i32).max(0) as u32).min(fh);
+    if clip_x1 >= clip_x2 || clip_y1 >= clip_y2 {
+        return;
+    }
+    let frame_stride = fw as usize * 3;
+    let sprite_stride = sw as usize * 4;
+    let frame_buf = frame.as_mut();
+    let sprite_buf = sprite.as_raw();
+    for fy in clip_y1..clip_y2 {
+        let sy = (fy as i32 - y) as u32;
+        let frame_row_start = fy as usize * frame_stride;
+        let sprite_row_start = sy as usize * sprite_stride;
+        for fx in clip_x1..clip_x2 {
+            let sx = (fx as i32 - x) as u32;
+            let si = sprite_row_start + sx as usize * 4;
+            let sa = sprite_buf[si + 3] as u32;
+            if sa == 0 {
+                continue;
+            }
+            let ea = sa * o256 / 256;
+            let inv_ea = 256 - ea;
+            let fi = frame_row_start + fx as usize * 3;
+            frame_buf[fi] = ((sprite_buf[si] as u32 * ea + frame_buf[fi] as u32 * inv_ea) / 256) as u8;
+            frame_buf[fi + 1] =
+                ((sprite_buf[si + 1] as u32 * ea + frame_buf[fi + 1] as u32 * inv_ea) / 256) as u8;
+            frame_buf[fi + 2] =
+                ((sprite_buf[si + 2] as u32 * ea + frame_buf[fi + 2] as u32 * inv_ea) / 256) as u8;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -687,6 +732,7 @@ struct NormalComponent {
     width: u32,
     height: u32,
     dead_line: Duration,
+    cached_text: Option<RgbaImage>,
 }
 
 pub fn same_specifications(

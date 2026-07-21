@@ -101,7 +101,12 @@ impl VideoDecoder {
             .unwrap_or(0)
     }
 
-    pub fn next_frame(&mut self) -> Result<Option<(f64, RgbImage)>> {
+    pub fn next_frame_into(&mut self, reuse: &mut RgbImage) -> Result<Option<f64>> {
+        assert_eq!(reuse.dimensions(), (self.width, self.height));
+        self.read_into(reuse)
+    }
+
+    fn read_into(&mut self, image: &mut RgbImage) -> Result<Option<f64>> {
         let mut decoded = ffmpeg::util::frame::video::Video::empty();
 
         loop {
@@ -120,9 +125,9 @@ impl VideoDecoder {
                         })
                         .unwrap_or(0.0);
 
-                    let image = avframe_rgb24_to_rgb_image(&rgb)?;
+                    avframe_rgb24_to_image(&rgb, image)?;
 
-                    return Ok(Some((ts_secs, image)));
+                    return Ok(Some(ts_secs));
                 }
                 Err(ffmpeg::Error::Other { errno }) if errno == EAGAIN => {
                     if self.draining {
@@ -157,16 +162,17 @@ impl VideoDecoder {
 
 unsafe impl Send for VideoDecoder {}
 
-fn avframe_rgb24_to_rgb_image(frame: &ffmpeg::util::frame::video::Video) -> Result<RgbImage> {
+fn avframe_rgb24_to_image(
+    frame: &ffmpeg::util::frame::video::Video,
+    image: &mut RgbImage,
+) -> Result<()> {
     unsafe {
         let frame_ptr = frame.as_ptr();
         let width = (*frame_ptr).width as u32;
         let height = (*frame_ptr).height as u32;
 
-        let mut img = RgbImage::new(width, height);
-
         let ret = ffmpeg::ffi::av_image_copy_to_buffer(
-            img.as_mut_ptr(),
+            image.as_mut_ptr(),
             (width * height * 3) as i32,
             (*frame_ptr).data.as_ptr() as *const *const u8,
             (*frame_ptr).linesize.as_ptr(),
@@ -182,6 +188,6 @@ fn avframe_rgb24_to_rgb_image(frame: &ffmpeg::util::frame::video::Video) -> Resu
             ));
         }
 
-        Ok(img)
+        Ok(())
     }
 }
