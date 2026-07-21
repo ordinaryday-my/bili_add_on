@@ -8,7 +8,7 @@ use ffmpeg::{
     software::scaling::{context::Context as Scaler, flag::Flags as ScalerFlags},
     util::error::EAGAIN,
 };
-use ndarray::Array3;
+use image::RgbImage;
 
 pub struct VideoDecoder {
     input: ffmpeg::format::context::input::Input,
@@ -101,7 +101,7 @@ impl VideoDecoder {
             .unwrap_or(0)
     }
 
-    pub fn next_frame(&mut self) -> Result<Option<(f64, Array3<u8>)>> {
+    pub fn next_frame(&mut self) -> Result<Option<(f64, RgbImage)>> {
         let mut decoded = ffmpeg::util::frame::video::Video::empty();
 
         loop {
@@ -120,9 +120,9 @@ impl VideoDecoder {
                         })
                         .unwrap_or(0.0);
 
-                    let array3 = avframe_rgb24_to_array3(&rgb)?;
+                    let image = avframe_rgb24_to_rgb_image(&rgb)?;
 
-                    return Ok(Some((ts_secs, array3)));
+                    return Ok(Some((ts_secs, image)));
                 }
                 Err(ffmpeg::Error::Other { errno }) if errno == EAGAIN => {
                     if self.draining {
@@ -155,17 +155,19 @@ impl VideoDecoder {
     }
 }
 
-fn avframe_rgb24_to_array3(frame: &ffmpeg::util::frame::video::Video) -> Result<Array3<u8>> {
+unsafe impl Send for VideoDecoder {}
+
+fn avframe_rgb24_to_rgb_image(frame: &ffmpeg::util::frame::video::Video) -> Result<RgbImage> {
     unsafe {
         let frame_ptr = frame.as_ptr();
-        let width = (*frame_ptr).width as usize;
-        let height = (*frame_ptr).height as usize;
+        let width = (*frame_ptr).width as u32;
+        let height = (*frame_ptr).height as u32;
 
-        let mut array = Array3::default((height, width, 3));
+        let mut img = RgbImage::new(width, height);
 
         let ret = ffmpeg::ffi::av_image_copy_to_buffer(
-            array.as_mut_ptr(),
-            (height * width * 3) as i32,
+            img.as_mut_ptr(),
+            (width * height * 3) as i32,
             (*frame_ptr).data.as_ptr() as *const *const u8,
             (*frame_ptr).linesize.as_ptr(),
             ffmpeg::util::format::pixel::Pixel::RGB24.into(),
@@ -176,10 +178,10 @@ fn avframe_rgb24_to_array3(frame: &ffmpeg::util::frame::video::Video) -> Result<
 
         if ret < 0 {
             return Err(anyhow!(
-                "AVFrame 到 ndarray 转换失败: 错误码 {ret}"
+                "AVFrame 到 RGB 图像转换失败: 错误码 {ret}"
             ));
         }
 
-        Ok(array)
+        Ok(img)
     }
 }

@@ -20,45 +20,48 @@ pub fn parse_danmakus(xml: String) -> anyhow::Result<Vec<Danmaku>> {
     let mut buf = Vec::new();
     let mut danmakus = Vec::new();
 
-        loop {
-            match reader.read_event_into(&mut buf)
-                .with_context(|| "XML 解析失败（非法的 XML 标签或属性）")? {
-                Event::Start(ref s) if s.name().as_ref() == b"d" => {
-                    let p_attr = s
-                        .attributes()
-                        .flatten()
-                        .find(|attr: &Attribute<'_>| attr.key.as_ref() == b"p")
-                        .map(|attr| attr.normalized_value(XmlVersion::Explicit1_1))
-                        .transpose()
-                        .with_context(|| "XML 属性规范化失败，p 属性值无法解码")?
-                        .unwrap_or_default();
+    loop {
+        match reader
+            .read_event_into(&mut buf)
+            .with_context(|| "XML 解析失败（非法的 XML 标签或属性）")?
+        {
+            Event::Start(ref s) if s.name().as_ref() == b"d" => {
+                let p_attr = s
+                    .attributes()
+                    .flatten()
+                    .find(|attr: &Attribute<'_>| attr.key.as_ref() == b"p")
+                    .map(|attr| attr.normalized_value(XmlVersion::Explicit1_1))
+                    .transpose()
+                    .with_context(|| "XML 属性规范化失败，p 属性值无法解码")?
+                    .unwrap_or_default();
 
-                    let content = reader.read_text(s.name())
-                        .with_context(|| "读取弹幕标签文本内容失败")?
-                        .into_inner();
+                let content = reader
+                    .read_text(s.name())
+                    .with_context(|| "读取弹幕标签文本内容失败")?
+                    .into_inner();
 
-                    let text_preview = {
-                        let s = String::from_utf8_lossy(&content);
-                        if s.len() > 60 {
-                            let truncated: String = s.chars().take(60).collect();
-                            format!("{truncated}...")
-                        } else {
-                            s.into_owned()
-                        }
-                    };
-
-                    if let Some(d) = Danmaku::new(p_attr, content).with_context(|| {
-                        let index = danmakus.len() + 1;
-                        format!("第{index}条弹幕解析失败 (文本预览: {text_preview})")
-                    })? {
-                        danmakus.push(d);
+                let text_preview = {
+                    let s = String::from_utf8_lossy(&content);
+                    if s.len() > 60 {
+                        let truncated: String = s.chars().take(60).collect();
+                        format!("{truncated}...")
+                    } else {
+                        s.into_owned()
                     }
+                };
+
+                if let Some(d) = Danmaku::new(p_attr, content).with_context(|| {
+                    let index = danmakus.len() + 1;
+                    format!("第{index}条弹幕解析失败 (文本预览: {text_preview})")
+                })? {
+                    danmakus.push(d);
                 }
-                Event::Eof => break,
-                _ => (),
             }
-            buf.clear();
+            Event::Eof => break,
+            _ => (),
         }
+        buf.clear();
+    }
 
     Ok(danmakus)
 }
@@ -140,7 +143,9 @@ impl Danmaku {
     pub fn new(styles: Cow<'_, str>, content: Cow<'_, [u8]>) -> anyhow::Result<Option<Self>> {
         let mut styles_it = styles.split(',');
 
-        let time_str = styles_it.next().context("p属性缺少第1字段（弹幕出现时间）")?;
+        let time_str = styles_it
+            .next()
+            .context("p属性缺少第1字段（弹幕出现时间）")?;
         let time = Duration::from_secs_f64(
             time_str
                 .parse::<f64>()
@@ -173,8 +178,8 @@ impl Danmaku {
             .context("弹幕文本内容UTF-8解码失败，内容可能包含非法字节序列")?;
 
         if mode_id == 7 {
-            let json: Vec<serde_json::Value> = serde_json::from_str(&content_str)
-                .with_context(|| {
+            let json: Vec<serde_json::Value> =
+                serde_json::from_str(&content_str).with_context(|| {
                     format!("高级弹幕 (mode=7) JSON 解析失败，前80字符: {content_str:.80}")
                 })?;
 
@@ -203,13 +208,9 @@ impl Danmaku {
                 .map(Duration::from_secs_f64)
                 .unwrap_or(Duration::ZERO);
 
-            let text = unescape(
-                json.get(4)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(""),
-            )
-            .map_err(|e| anyhow!("弹幕文本XML实体解码失败: {e}"))?
-            .to_string();
+            let text = unescape(json.get(4).and_then(|v| v.as_str()).unwrap_or(""))
+                .map_err(|e| anyhow!("弹幕文本XML实体解码失败: {e}"))?
+                .to_string();
 
             let z_rotate = json.get(5).and_then(|v| v.as_f64()).unwrap_or(0.0);
             let y_rotate = json.get(6).and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -346,4 +347,3 @@ pub fn get_danmuku_xml_from_file(file: &Path) -> anyhow::Result<String> {
     let xml = decode_bytes(bytes, "").context("解码弹幕文件编码失败")?;
     Ok(xml)
 }
-

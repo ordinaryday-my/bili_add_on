@@ -85,6 +85,13 @@ impl Args {
             }
         }
 
+        if !(0.0..=1.0).contains(&self.opacity) {
+            bail!(
+                "opacity 必须在 0.0 到 1.0 之间，当前值: {}",
+                self.opacity
+            );
+        }
+
         if self
             .bottom_ratio
             .partial_cmp(&self.top_ratio)

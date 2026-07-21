@@ -1,14 +1,12 @@
-use std::{
-    collections::HashSet,
-    path::Path,
-    time::Duration,
-};
+use std::{panic, path::Path, thread, time::Duration};
 
 use ab_glyph::{FontVec, PxScale};
 use anyhow::{anyhow, Context, Result};
-use image::{ImageBuffer, Rgb, RgbImage};
+use bit_set::BitSet;
+use crossbeam_channel::bounded;
+use image::{Rgb, RgbImage};
 use imageproc::drawing::{draw_text_mut, text_size};
-use ndarray::Array3;
+
 use ffmpeg_next as ffmpeg;
 
 use crate::{
@@ -39,16 +37,16 @@ impl FfmpegEncoder {
             .or_else(|| ffmpeg::encoder::find(ffmpeg::codec::Id::H264))
             .context("找不到可用的 H.264 编码器（libx264），请确认 ffmpeg 安装完整")?;
 
-        let global_header = octx.format().flags()
+        let global_header = octx
+            .format()
+            .flags()
             .contains(ffmpeg::format::flag::Flags::GLOBAL_HEADER);
 
-        let mut ost = octx.add_stream(codec.clone())
-            .context("添加视频流到输出文件失败")?;
+        let mut ost = octx.add_stream(codec).context("添加视频流到输出文件失败")?;
         let ost_index = ost.index();
 
         let ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
-        let mut encoder = ctx.encoder().video()
-            .context("创建视频编码器上下文失败")?;
+        let mut encoder = ctx.encoder().video().context("创建视频编码器上下文失败")?;
 
         encoder.set_width(width);
         encoder.set_height(height);
@@ -60,7 +58,8 @@ impl FfmpegEncoder {
             encoder.set_flags(ffmpeg::codec::flag::Flags::GLOBAL_HEADER);
         }
 
-        let encoder = encoder.open()
+        let encoder = encoder
+            .open()
             .map_err(|e| anyhow!("打开 H.264 编码器失败: {e:?}"))?;
         let encoder_time_base = encoder.time_base();
 
@@ -74,25 +73,19 @@ impl FfmpegEncoder {
             width,
             height,
             ffmpeg::software::scaling::flag::Flags::empty(),
-        ).context("创建像素格式转换器失败（RGB → YUV420P）")?;
+        )
+        .context("创建像素格式转换器失败（RGB → YUV420P）")?;
 
-        let src_frame = ffmpeg::frame::Video::new(
-            ffmpeg::util::format::Pixel::RGB24,
-            width,
-            height,
-        );
+        let src_frame =
+            ffmpeg::frame::Video::new(ffmpeg::util::format::Pixel::RGB24, width, height);
 
-        let mut dst_frame = ffmpeg::frame::Video::new(
-            ffmpeg::util::format::Pixel::YUV420P,
-            width,
-            height,
-        );
+        let mut dst_frame =
+            ffmpeg::frame::Video::new(ffmpeg::util::format::Pixel::YUV420P, width, height);
         unsafe {
             ffmpeg::ffi::av_frame_get_buffer(dst_frame.as_mut_ptr(), 0);
         }
 
-        octx.write_header()
-            .context("写入输出文件头失败")?;
+        octx.write_header().context("写入输出文件头失败")?;
 
         Ok(Self {
             output: octx,
@@ -106,43 +99,42 @@ impl FfmpegEncoder {
         })
     }
 
-    fn encode(&mut self, ndarray_frame: &Array3<u8>, timestamp_secs: f64) -> Result<()> {
-        let (height, width, _channels) = ndarray_frame.dim();
-        let layout = ndarray_frame.as_standard_layout();
-        let slice = layout
-            .as_slice()
-            .context("帧数据不连续，无法转换为编码器输入格式")?;
+    fn encode(&mut self, image: &RgbImage, timestamp_secs: f64) -> Result<()> {
+        let (width, height) = image.dimensions();
+        let raw = image.as_raw();
 
         unsafe {
             ffmpeg::ffi::av_image_fill_arrays(
                 (*self.src_frame.as_mut_ptr()).data.as_mut_ptr(),
                 (*self.src_frame.as_mut_ptr()).linesize.as_mut_ptr(),
-                slice.as_ptr(),
+                raw.as_ptr(),
                 ffmpeg::util::format::Pixel::RGB24.into(),
                 width as i32,
                 height as i32,
                 1,
             );
         }
-        self.src_frame.set_width(width as u32);
-        self.src_frame.set_height(height as u32);
+        self.src_frame.set_width(width);
+        self.src_frame.set_height(height);
 
         let tb_num = self.encoder_time_base.numerator() as f64;
         let tb_den = self.encoder_time_base.denominator() as f64;
         let pts = (timestamp_secs * tb_den / tb_num).round() as i64;
         self.src_frame.set_pts(Some(pts));
 
-        self.scaler.run(&self.src_frame, &mut self.dst_frame)
+        self.scaler
+            .run(&self.src_frame, &mut self.dst_frame)
             .context("帧像素格式缩放失败")?;
         self.dst_frame.set_pts(Some(pts));
 
-        if self.frame_count % 12 == 0 {
+        if self.frame_count.is_multiple_of(12) {
             self.dst_frame.set_kind(ffmpeg::util::picture::Type::I);
         }
 
         self.frame_count += 1;
 
-        self.encoder.send_frame(&self.dst_frame)
+        self.encoder
+            .send_frame(&self.dst_frame)
             .context("发送帧到 H.264 编码器失败")?;
 
         self.receive_and_write()
@@ -169,8 +161,9 @@ impl FfmpegEncoder {
                         .write(&mut self.output)
                         .context("写入编码包到输出文件失败")?;
                 }
-                Err(ffmpeg::Error::Other { errno })
-                    if errno == ffmpeg::util::error::EAGAIN => break,
+                Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {
+                    break
+                }
                 Err(ffmpeg::Error::Eof) => break,
                 Err(e) => return Err(anyhow!("编码器接收包错误: {e}")),
             }
@@ -179,8 +172,7 @@ impl FfmpegEncoder {
     }
 
     fn finish(&mut self) -> Result<()> {
-        self.encoder.send_eof()
-            .context("编码器发送 EOF 信号失败")?;
+        self.encoder.send_eof().context("编码器发送 EOF 信号失败")?;
 
         let ost_time_base = self
             .output
@@ -199,19 +191,21 @@ impl FfmpegEncoder {
                         .write(&mut self.output)
                         .context("写入最终编码包失败")?;
                 }
-                Err(ffmpeg::Error::Other { errno })
-                    if errno == ffmpeg::util::error::EAGAIN => break,
+                Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {
+                    break
+                }
                 Err(ffmpeg::Error::Eof) => break,
                 Err(e) => return Err(anyhow!("编码器最终收包错误: {e}")),
             }
         }
 
-        self.output.write_trailer()
-            .context("写入输出文件尾失败")?;
+        self.output.write_trailer().context("写入输出文件尾失败")?;
 
         Ok(())
     }
 }
+
+unsafe impl Send for FfmpegEncoder {}
 
 pub fn video_process(
     mut decoder: VideoDecoder,
@@ -220,6 +214,8 @@ pub fn video_process(
     args: &Args,
     frame_duration_secs: f64,
 ) -> Result<()> {
+    danmakus.sort_unstable_by_key(|dan| std::cmp::Reverse(dan.time));
+
     let (video_width, video_height) = decoder.size();
     let gap = args.line_spacing;
     let area_top = (video_height as f64 * args.top_ratio) as u32;
@@ -242,168 +238,222 @@ pub fn video_process(
     let mut frame_count = 0u64;
     let total_frames = decoder.frame_count();
 
-    loop {
-        let (ts_secs, frame) = match decoder.next_frame()? {
-            Some(res) => res,
-            None => break,
-        };
-        let dur = Duration::from_secs_f64(ts_secs);
+    thread::scope(move |s| -> Result<()> {
+        let (decode_s, decode_r) = bounded(500);
+        let decode_producer = s.spawn(move || -> Result<()> {
+            loop {
+                let (ts_secs, image) = match decoder.next_frame()? {
+                    Some(res) => res,
+                    None => break,
+                };
+                let dur = Duration::from_secs_f64(ts_secs);
+                decode_s
+                    .send((ts_secs, dur, image))
+                    .expect("接收端不应提早关闭");
+            }
+            Ok(())
+        });
 
-        let mut image = array3_to_rgb_image(&frame)
-            .with_context(|| format!("帧数据转换为RGB图像失败 (时间戳: {ts_secs})"))?;
+        let (encode_s, encode_v) = bounded(500);
+        let process_pipeline = s.spawn(move || -> Result<()> {
+            loop {
+                let Ok((ts_secs, dur, mut image)) = decode_r.recv() else {
+                    break;
+                };
+                let intime_len = danmakus
+                    .iter()
+                    .rev()
+                    .take_while(|dan| dan.time <= dur)
+                    .count();
+                let len = danmakus.len();
+                let enqueue = danmakus.drain((len - intime_len)..len).rev();
 
-        let enqueue = danmakus.extract_if(.., |d| d.time <= dur);
-
-        for d in enqueue {
-            let scale = PxScale::from(d.font_size as f32);
-            let (width, height) = text_size(scale, &regular, &d.text);
-            let dead_line = match d.mode {
-                DanmakuMode::Scroll | DanmakuMode::Reverse => {
-                    let travel_frames = (width + video_width).div_ceil(args.speed);
-                    dur + Duration::from_secs_f64(
-                        travel_frames as f64 * frame_duration_secs,
-                    )
+                for d in enqueue {
+                    let scale = PxScale::from((d.font_size as f32) * args.font_scale);
+                    let (width, height) = text_size(scale, &regular, &d.text);
+                    let dead_line = match d.mode {
+                        DanmakuMode::Scroll | DanmakuMode::Reverse => {
+                            let travel_frames = (width + video_width).div_ceil(args.speed);
+                            dur + Duration::from_secs_f64(
+                                travel_frames as f64 * frame_duration_secs,
+                            )
+                        }
+                        DanmakuMode::Top | DanmakuMode::Bottom => {
+                            dur + Duration::from_secs_f64(args.fixed_duration)
+                        }
+                        _ => Duration::from_millis(0),
+                    };
+                    match d.mode {
+                        DanmakuMode::Scroll => scroll_slots
+                            .set_first_empty((
+                                d,
+                                NormalComponent {
+                                    x: video_width as i64,
+                                    y: None,
+                                    width,
+                                    height,
+                                    dead_line,
+                                },
+                            ))
+                            .ignore(),
+                        DanmakuMode::Bottom => bottom_slots
+                            .set_first_empty((
+                                d,
+                                NormalComponent {
+                                    x: video_width as i64 / 2 - width as i64 / 2,
+                                    y: None,
+                                    width,
+                                    height,
+                                    dead_line,
+                                },
+                            ))
+                            .ignore(),
+                        DanmakuMode::Top => top_slots
+                            .set_first_empty((
+                                d,
+                                NormalComponent {
+                                    x: video_width as i64 / 2 - width as i64 / 2,
+                                    y: None,
+                                    width,
+                                    height,
+                                    dead_line,
+                                },
+                            ))
+                            .ignore(),
+                        DanmakuMode::Reverse => reverse_slots
+                            .set_first_empty((
+                                d,
+                                NormalComponent {
+                                    x: -(width as i64),
+                                    y: None,
+                                    width,
+                                    height,
+                                    dead_line,
+                                },
+                            ))
+                            .ignore(),
+                        _ => (),
+                    };
                 }
-                DanmakuMode::Top | DanmakuMode::Bottom => {
-                    dur + Duration::from_secs_f64(args.fixed_duration)
+
+                del_dead(&mut scroll_slots, dur);
+                del_dead(&mut reverse_slots, dur);
+                del_dead(&mut top_slots, dur);
+                del_dead(&mut bottom_slots, dur);
+
+                draw_scroll_danmukus(
+                    &mut image,
+                    &mut scroll_slots,
+                    &regular,
+                    line_height,
+                    rail_cnt,
+                    args.font_scale,
+                    area_top as i64,
+                    ToLeft,
+                    args.opacity,
+                );
+                draw_scroll_danmukus(
+                    &mut image,
+                    &mut reverse_slots,
+                    &regular,
+                    line_height,
+                    rail_cnt,
+                    args.font_scale,
+                    area_top as i64,
+                    ToRight,
+                    args.opacity,
+                );
+                scroll(
+                    scroll_slots
+                        .iter_mut()
+                        .filter_map(|cur| cur.as_mut().map(|(_, c)| c))
+                        .filter(|c| c.y.is_some()),
+                    ToLeft,
+                    args.speed,
+                );
+                scroll(
+                    reverse_slots
+                        .iter_mut()
+                        .filter_map(|cur| cur.as_mut().map(|(_, c)| c))
+                        .filter(|c| c.y.is_some()),
+                    ToRight,
+                    args.speed,
+                );
+
+                draw_fixed_danmukus(
+                    &mut image,
+                    &mut top_slots,
+                    &regular,
+                    line_height,
+                    rail_cnt,
+                    args.font_scale,
+                    area_top as i64,
+                    true,
+                    args.opacity,
+                );
+                draw_fixed_danmukus(
+                    &mut image,
+                    &mut bottom_slots,
+                    &regular,
+                    line_height,
+                    rail_cnt,
+                    args.font_scale,
+                    area_top as i64,
+                    false,
+                    args.opacity,
+                );
+
+                encode_s
+                    .send((image, ts_secs))
+                    .expect("接收端不得早于发送端关闭");
+                frame_count += 1;
+                if !args.quiet {
+                    render_progress(frame_count, total_frames);
                 }
-                _ => Duration::from_millis(0),
-            };
-            match d.mode {
-                DanmakuMode::Scroll => scroll_slots
-                    .set_first_empty((
-                        d,
-                        NormalComponent {
-                            x: video_width as i64,
-                            y: None,
-                            width,
-                            height,
-                            dead_line,
-                        },
-                    ))
-                    .ignore(),
-                DanmakuMode::Bottom => bottom_slots
-                    .set_first_empty((
-                        d,
-                        NormalComponent {
-                            x: video_width as i64 / 2 - width as i64 / 2,
-                            y: None,
-                            width,
-                            height,
-                            dead_line,
-                        },
-                    ))
-                    .ignore(),
-                DanmakuMode::Top => top_slots
-                    .set_first_empty((
-                        d,
-                        NormalComponent {
-                            x: video_width as i64 / 2 - width as i64 / 2,
-                            y: None,
-                            width,
-                            height,
-                            dead_line,
-                        },
-                    ))
-                    .ignore(),
-                DanmakuMode::Reverse => reverse_slots
-                    .set_first_empty((
-                        d,
-                        NormalComponent {
-                            x: -(width as i64),
-                            y: None,
-                            width,
-                            height,
-                            dead_line,
-                        },
-                    ))
-                    .ignore(),
-                _ => (),
-            };
+            }
+
+            Ok(())
+        });
+
+        let encode_customer = s.spawn(move || -> Result<()> {
+            loop {
+                let Ok((image, ts_secs)) = encode_v.recv() else {
+                    break;
+                };
+
+                encoder
+                    .encode(&image, ts_secs)
+                    .with_context(|| format!("编码帧失败 (时间戳: {ts_secs})"))?;
+            }
+
+            if !args.quiet {
+                eprintln!(); // finalize progress bar line
+            }
+
+            encoder
+                .finish()
+                .context("编码器完成写入失败（输出文件不可用）")?;
+            Ok(())
+        });
+
+        let handles = [decode_producer, process_pipeline, encode_customer];
+        for handle in handles {
+            match handle.join() {
+                Ok(res) => res?,
+                Err(e) => {
+                    if let Some(msg) = e.downcast_ref::<&'static str>() {
+                        panic!("{}", msg);
+                    } else if let Some(msg) = e.downcast_ref::<String>() {
+                        panic!("{}", msg);
+                    } else {
+                        panic!("panic with unknown payload");
+                    }
+                }
+            }
         }
 
-        del_dead(&mut scroll_slots, dur);
-        del_dead(&mut reverse_slots, dur);
-        del_dead(&mut top_slots, dur);
-        del_dead(&mut bottom_slots, dur);
-
-        draw_scroll_danmukus(
-            &mut image,
-            &mut scroll_slots,
-            &regular,
-            line_height,
-            rail_cnt,
-            args.font_scale,
-            area_top as i64,
-            ToLeft,
-            args.opacity,
-        );
-        draw_scroll_danmukus(
-            &mut image,
-            &mut reverse_slots,
-            &regular,
-            line_height,
-            rail_cnt,
-            args.font_scale,
-            area_top as i64,
-            ToRight,
-            args.opacity,
-        );
-        scroll(
-            scroll_slots
-                .iter_mut()
-                .filter_map(|cur| cur.as_mut().map(|(_, c)| c))
-                .filter(|c| c.y.is_some()),
-            ToLeft,
-            args.speed,
-        );
-        scroll(
-            reverse_slots
-                .iter_mut()
-                .filter_map(|cur| cur.as_mut().map(|(_, c)| c))
-                .filter(|c| c.y.is_some()),
-            ToRight,
-            args.speed,
-        );
-
-        draw_fixed_danmukus(
-            &mut image,
-            &mut top_slots,
-            &regular,
-            line_height,
-            rail_cnt,
-            args.font_scale,
-            area_top as i64,
-            true,
-            args.opacity,
-        );
-        draw_fixed_danmukus(
-            &mut image,
-            &mut bottom_slots,
-            &regular,
-            line_height,
-            rail_cnt,
-            args.font_scale,
-            area_top as i64,
-            false,
-            args.opacity,
-        );
-
-        let video_frame = rgb_image_to_array3(&image);
-        encoder
-            .encode(&video_frame, ts_secs)
-            .with_context(|| format!("编码帧失败 (时间戳: {ts_secs})"))?;
-        frame_count += 1;
-        if !args.quiet {
-            render_progress(frame_count, total_frames);
-        }
-    }
-
-    if !args.quiet {
-        eprintln!(); // finalize progress bar line
-    }
-
-    encoder.finish().context("编码器完成写入失败（输出文件不可用）")?;
+        Ok(())
+    })?;
 
     Ok(())
 }
@@ -419,7 +469,11 @@ fn draw_fixed_danmukus(
     to_bottom: bool,
     opacity: f64,
 ) {
+    const OFFSET: i64 = 1000;
+    let cap = fixed_slots.len() + OFFSET as usize;
+    let mut occupieds = BitSet::with_capacity(cap);
     let mut ensure_y_q = Vec::new();
+    let mut pending_y: Vec<i64> = Vec::new();
     for (idx, opt) in fixed_slots
         .iter()
         .enumerate()
@@ -450,16 +504,21 @@ fn draw_fixed_danmukus(
                 }
             })
         });
-        let mut occupieds = HashSet::with_capacity(fixed_slots.len());
-        for ( height, y) in raw_occupieds {
-            occupieds.insert(y);
-            if height > line_height {
-                occupieds.insert(y + (line_height as i64) * (height / line_height) as i64);
+
+        for (height, y) in raw_occupieds {
+            occupieds.insert((y + OFFSET) as usize);
+            let extra_rails = height.div_ceil(line_height);
+            for i in 1..extra_rails {
+                occupieds.insert(((y + i as i64 * line_height as i64) + OFFSET) as usize);
             }
         }
 
+        for &y in &pending_y {
+            occupieds.insert((y + OFFSET) as usize);
+        }
+
         let rail_hs = rail_hs(line_height, rail_cnt);
-        let free = rail_hs.filter(|h| !occupieds.contains(h));
+        let free = rail_hs.filter(|h| !occupieds.contains((h + OFFSET) as usize));
         let mut free: Box<dyn Iterator<Item = _>> = if to_bottom {
             Box::new(free)
         } else {
@@ -483,7 +542,10 @@ fn draw_fixed_danmukus(
             font,
             &dan.text,
         );
+        pending_y.push(y);
         ensure_y_q.push((idx, y));
+        drop(free);
+        occupieds.reset();
     }
 
     for (idx, y) in ensure_y_q {
@@ -533,7 +595,11 @@ fn draw_scroll_danmukus(
     dir: Direction,
     opacity: f64,
 ) {
+    const OFFSET: i64 = 1000;
+    let cap = scroll_slots.len() + OFFSET as usize;
+    let mut occupieds = BitSet::with_capacity(cap);
     let mut ensure_y_q = Vec::new();
+    let mut pending_y: Vec<i64> = Vec::new();
     for (idx, opt) in scroll_slots
         .iter()
         .enumerate()
@@ -564,32 +630,37 @@ fn draw_scroll_danmukus(
                 }
             })
         });
-        let mut occupieds = HashSet::with_capacity(scroll_slots.len());
+
         for (width, height, x, y) in raw_occupieds {
             debug_assert_eq!(y % line_height as i64, 0);
             match dir {
                 ToLeft => {
                     if width as i64 + x > comp.x {
-                        occupieds.insert(y);
+                        occupieds.insert((y + OFFSET) as usize);
                     } else {
                         continue;
                     }
                 }
                 ToRight => {
                     if x < comp.x + comp.width as i64 {
-                        occupieds.insert(y);
+                        occupieds.insert((y + OFFSET) as usize);
                     } else {
                         continue;
                     }
                 }
             }
-            if height > line_height {
-                occupieds.insert(y + (line_height as i64) * (height / line_height) as i64);
+            let extra_rails = height.div_ceil(line_height);
+            for i in 1..extra_rails {
+                occupieds.insert(((y + i as i64 * line_height as i64) + OFFSET) as usize);
             }
         }
 
+        for &y in &pending_y {
+            occupieds.insert((y + OFFSET) as usize);
+        }
+
         let rail_hs = rail_hs(line_height, rail_cnt);
-        let mut free = rail_hs.filter(|h| !occupieds.contains(h));
+        let mut free = rail_hs.filter(|h| !occupieds.contains((h + OFFSET) as usize));
 
         let y = match free.next() {
             None => {
@@ -608,7 +679,10 @@ fn draw_scroll_danmukus(
             font,
             &dan.text,
         );
+        pending_y.push(y);
         ensure_y_q.push((idx, y));
+        drop(free);
+        occupieds.reset();
     }
 
     for (idx, y) in ensure_y_q {
@@ -657,37 +731,6 @@ pub fn same_specifications(
     let frame_duration_secs = 1.0 / frame_rate as f64;
 
     Ok((encoder, frame_duration_secs))
-}
-
-pub fn array3_to_rgb_image(array: &Array3<u8>) -> Result<RgbImage> {
-    let (height, width, channels) = array.dim();
-    if channels != 3 {
-        return Err(anyhow!(
-            "视频帧通道数异常：期望 RGB 3 通道，实际得到 {channels} 通道"
-        ));
-    }
-
-    let layout = array.as_standard_layout();
-    let slice = layout
-        .as_slice()
-        .ok_or_else(|| anyhow!("视频帧数据不连续或使用了非标准内存布局，无法转换为图像"))?;
-
-    let img = ImageBuffer::from_vec(width as u32, height as u32, slice.to_vec())
-        .ok_or_else(|| {
-            anyhow!(
-                "图像缓冲区创建失败 ({width}x{height}x3)，像素数据长度与尺寸不匹配"
-            )
-        })?;
-
-    Ok(img)
-}
-
-pub fn rgb_image_to_array3(img: &RgbImage) -> Array3<u8> {
-    let (width, height) = img.dimensions();
-    let raw_pixels = img.as_raw();
-
-    Array3::from_shape_vec((height as usize, width as usize, 3), raw_pixels.to_vec())
-        .expect("图像转视频帧失败：尺寸不匹配，像素数据长度与维度 (height×width×3) 不一致")
 }
 
 fn render_progress(current: u64, total: u64) {
