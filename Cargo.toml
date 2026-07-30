@@ -1,6 +1,6 @@
 [package]
 name = "bili_add_on"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 description = "为视频叠加B站弹幕（danmaku）的命令行工具，支持从B站视频ID自动获取弹幕XML或指定本地弹幕文件"
 license = "MIT"
