@@ -3,9 +3,7 @@ use std::{borrow::Cow, fs, path::Path, time::Duration};
 use anyhow::{anyhow, Context};
 use image::Rgb;
 use quick_xml::{
-    escape::unescape,
-    events::{attributes::Attribute, Event},
-    XmlVersion,
+    XmlVersion, escape::unescape, events::{Event, attributes::Attribute},
 };
 
 use crate::{
@@ -66,7 +64,7 @@ pub fn parse_danmakus(xml: String) -> anyhow::Result<Vec<Danmaku>> {
     Ok(danmakus)
 }
 
-fn fix_bili_xml(xml: &str) -> String {
+pub fn fix_bili_xml(xml: &str) -> String {
     let tag_re = regex::Regex::new(r"</?([a-zA-Z]\w*)(\s[^<>]*)?/?>|<\?[^>]*\?>").unwrap();
     let known: &[&str] = &[
         "i",
@@ -346,4 +344,235 @@ pub fn get_danmuku_xml_from_file(file: &Path) -> anyhow::Result<String> {
     let bytes = fs::read(file).with_context(|| format!("读取弹幕文件失败: {}", file.display()))?;
     let xml = decode_bytes(bytes, "").context("解码弹幕文件编码失败")?;
     Ok(xml)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_danmaku_mode_from_id_scroll_1() {
+        assert!(matches!(
+            DanmakuMode::from_id(1),
+            Some(DanmakuMode::Scroll)
+        ));
+    }
+
+    #[test]
+    fn test_danmaku_mode_from_id_scroll_2() {
+        assert!(matches!(
+            DanmakuMode::from_id(2),
+            Some(DanmakuMode::Scroll)
+        ));
+    }
+
+    #[test]
+    fn test_danmaku_mode_from_id_scroll_3() {
+        assert!(matches!(
+            DanmakuMode::from_id(3),
+            Some(DanmakuMode::Scroll)
+        ));
+    }
+
+    #[test]
+    fn test_danmaku_mode_from_id_bottom() {
+        assert!(matches!(
+            DanmakuMode::from_id(4),
+            Some(DanmakuMode::Bottom)
+        ));
+    }
+
+    #[test]
+    fn test_danmaku_mode_from_id_top() {
+        assert!(matches!(
+            DanmakuMode::from_id(5),
+            Some(DanmakuMode::Top)
+        ));
+    }
+
+    #[test]
+    fn test_danmaku_mode_from_id_reverse() {
+        assert!(matches!(
+            DanmakuMode::from_id(6),
+            Some(DanmakuMode::Reverse)
+        ));
+    }
+
+    #[test]
+    fn test_danmaku_mode_from_id_bas() {
+        assert!(matches!(DanmakuMode::from_id(9), Some(DanmakuMode::Bas)));
+    }
+
+    #[test]
+    fn test_danmaku_mode_from_id_unknown() {
+        assert!(DanmakuMode::from_id(0).is_none());
+        assert!(DanmakuMode::from_id(8).is_none());
+        assert!(DanmakuMode::from_id(99).is_none());
+    }
+
+    #[test]
+    fn test_escape_text_no_special_chars() {
+        assert_eq!(escape_text("hello"), "hello");
+    }
+
+    #[test]
+    fn test_escape_text_ampersand() {
+        assert_eq!(escape_text("a&b"), "a&amp;b");
+    }
+
+    #[test]
+    fn test_escape_text_lt() {
+        assert_eq!(escape_text("a<b"), "a&lt;b");
+    }
+
+    #[test]
+    fn test_escape_text_mixed() {
+        assert_eq!(escape_text("a&b<c"), "a&amp;b&lt;c");
+    }
+
+    #[test]
+    fn test_escape_text_multiple() {
+        assert_eq!(escape_text("&&"), "&amp;&amp;");
+    }
+
+    #[test]
+    fn test_fix_bili_xml_simple_valid() {
+        let xml = "<i><d p=\"1.0,1,25,16777215\">hello</d></i>";
+        let result = fix_bili_xml(xml);
+        assert!(result.contains("<i>"));
+        assert!(result.contains("<d p=\"1.0,1,25,16777215\">"));
+    }
+
+    #[test]
+    fn test_fix_bili_xml_escapes_unknown_text() {
+        let xml = "raw text & special < chars";
+        let result = fix_bili_xml(xml);
+        assert!(result.contains("&amp;"));
+        assert!(result.contains("&lt;"));
+    }
+
+    #[test]
+    fn test_fix_bili_xml_preserves_text_inside_tags() {
+        let xml = "<i>hello & world</i>";
+        let result = fix_bili_xml(xml);
+        assert_eq!(result, "<i>hello & world</i>");
+    }
+
+    #[test]
+    fn test_fix_bili_xml_known_tags_pass_through() {
+        let xml = "<i><chatserver>chat.bilibili.com</chatserver></i>";
+        let result = fix_bili_xml(xml);
+        assert!(result.contains("<chatserver>"));
+        assert!(result.contains("chat.bilibili.com"));
+    }
+
+    #[test]
+    fn test_danmaku_new_scroll() {
+        let dan = Danmaku::new(
+            Cow::Borrowed("1.0,1,25,16777215"),
+            Cow::Borrowed("Hello World".as_bytes()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(dan.time, Duration::from_secs_f64(1.0));
+        assert!(matches!(dan.mode, DanmakuMode::Scroll));
+        assert_eq!(dan.font_size, 25);
+        assert_eq!(dan.color, Rgb([255, 255, 255]));
+        assert_eq!(dan.text, "Hello World");
+    }
+
+    #[test]
+    fn test_danmaku_new_bottom() {
+        let dan = Danmaku::new(
+            Cow::Borrowed("5.0,4,18,255"),
+            Cow::Borrowed("bottom text".as_bytes()),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(dan.mode, DanmakuMode::Bottom));
+        assert_eq!(dan.text, "bottom text");
+        assert_eq!(dan.color, Rgb([0, 0, 255]));
+    }
+
+    #[test]
+    fn test_danmaku_new_top() {
+        let dan = Danmaku::new(
+            Cow::Borrowed("3.5,5,30,16711680"),
+            Cow::Borrowed("top text".as_bytes()),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(matches!(dan.mode, DanmakuMode::Top));
+        assert_eq!(dan.text, "top text");
+    }
+
+    #[test]
+    fn test_danmaku_new_unsupported_mode_returns_none() {
+        let dan = Danmaku::new(
+            Cow::Borrowed("1.0,8,25,16777215"),
+            Cow::Borrowed("unknown".as_bytes()),
+        )
+        .unwrap();
+        assert!(dan.is_none());
+    }
+
+    #[test]
+    fn test_danmaku_new_missing_fields() {
+        let result = Danmaku::new(
+            Cow::Borrowed("1.0"),
+            Cow::Borrowed("text".as_bytes()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_danmakus_basic() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<i>
+    <d p="1.0,1,25,16777215,1234567890,0,a1b2c3,1001,0">Hello</d>
+    <d p="2.0,4,18,255,1234567891,0,d4e5f6,1002,0">Bottom</d>
+</i>"#
+            .to_string();
+        let danmakus = parse_danmakus(xml).unwrap();
+        assert_eq!(danmakus.len(), 2);
+        assert_eq!(danmakus[0].text, "Hello");
+        assert!(matches!(danmakus[0].mode, DanmakuMode::Scroll));
+        assert_eq!(danmakus[1].text, "Bottom");
+        assert!(matches!(danmakus[1].mode, DanmakuMode::Bottom));
+    }
+
+    #[test]
+    fn test_parse_danmakus_empty() {
+        let xml = "<i></i>".to_string();
+        let danmakus = parse_danmakus(xml).unwrap();
+        assert!(danmakus.is_empty());
+    }
+
+    #[test]
+    fn test_parse_danmakus_skips_unsupported_modes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<i>
+    <d p="1.0,1,25,16777215">scroll</d>
+    <d p="2.0,8,18,255">unknown</d>
+    <d p="3.0,5,30,16711680">top</d>
+</i>"#
+            .to_string();
+        let danmakus = parse_danmakus(xml).unwrap();
+        assert_eq!(danmakus.len(), 2);
+        assert_eq!(danmakus[0].text, "scroll");
+        assert_eq!(danmakus[1].text, "top");
+    }
+
+    #[test]
+    fn test_parse_danmakus_xml_entities() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<i>
+    <d p="1.0,1,25,16777215">Hello &amp; World &lt;3</d>
+</i>"#
+            .to_string();
+        let danmakus = parse_danmakus(xml).unwrap();
+        assert_eq!(danmakus.len(), 1);
+        assert_eq!(danmakus[0].text, "Hello & World <3");
+    }
 }

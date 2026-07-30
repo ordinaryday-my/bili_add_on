@@ -13,90 +13,207 @@ use crate::{
     core::Direction::{ToLeft, ToRight},
     danmaku::{Danmaku, DanmakuMode},
     decoder::VideoDecoder,
+    hw,
     interaction::Args,
-    utils::{GrowableVec, Ignore},
+    utils::{GrowableVec, Ignore, blit_cached_text, rail_hs},
 };
+
+#[allow(dead_code)]
+pub(crate) enum EncoderPref {
+    Auto,
+    Specific(hw::HwCodec),
+    Software,
+}
 
 pub(crate) struct FfmpegEncoder {
     output: ffmpeg::format::context::Output,
     encoder: ffmpeg::encoder::Video,
-    scaler: ffmpeg::software::scaling::context::Context,
     ost_index: usize,
     encoder_time_base: ffmpeg::Rational,
-    src_frame: ffmpeg::frame::Video,
-    dst_frame: ffmpeg::frame::Video,
     frame_count: u64,
+    sw_scaler: ffmpeg::software::scaling::context::Context,
+    sw_frame_rgb: ffmpeg::frame::Video,
+    sw_frame_yuv: ffmpeg::frame::Video,
+    hw_setup: Option<hw::HwSetup>,
 }
 
+unsafe impl Send for FfmpegEncoder {}
+
 impl FfmpegEncoder {
-    fn new(path: &Path, width: u32, height: u32, frame_rate: f32) -> Result<Self> {
+    fn new(
+        path: &Path,
+        width: u32,
+        height: u32,
+        frame_rate: f32,
+        encoder_pref: EncoderPref,
+    ) -> Result<Self> {
         let mut octx = ffmpeg::format::output(path)
             .with_context(|| format!("创建视频输出文件失败: {}", path.display()))?;
-
-        let codec = ffmpeg::encoder::find_by_name("libx264")
-            .or_else(|| ffmpeg::encoder::find(ffmpeg::codec::Id::H264))
-            .context("找不到可用的 H.264 编码器（libx264），请确认 ffmpeg 安装完整")?;
 
         let global_header = octx
             .format()
             .flags()
             .contains(ffmpeg::format::flag::Flags::GLOBAL_HEADER);
 
-        let mut ost = octx.add_stream(codec).context("添加视频流到输出文件失败")?;
-        let ost_index = ost.index();
+        let candidates: Vec<Option<hw::HwCodec>> = match encoder_pref {
+            EncoderPref::Auto => {
+                let mut v: Vec<_> = hw::HwCodec::all().into_iter().map(Some).collect();
+                v.push(None);
+                v
+            }
+            EncoderPref::Specific(c) => vec![Some(c), None],
+            EncoderPref::Software => vec![None],
+        };
 
-        let ctx = ffmpeg::codec::context::Context::new_with_codec(codec);
-        let mut encoder = ctx.encoder().video().context("创建视频编码器上下文失败")?;
+        let mut last_err: Option<anyhow::Error> = None;
+
+        for candidate in &candidates {
+            let codec = match candidate {
+                Some(hw_codec) => {
+                    match ffmpeg::encoder::find_by_name(hw_codec.encoder_name()) {
+                        Some(c) => c,
+                        None => {
+                            last_err =
+                                Some(anyhow!("找不到编码器: {}", hw_codec.encoder_name()));
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    match ffmpeg::encoder::find_by_name("libx264")
+                        .or_else(|| ffmpeg::encoder::find(ffmpeg::codec::Id::H264))
+                    {
+                        Some(c) => c,
+                        None => {
+                            last_err = Some(anyhow!(
+                                "找不到可用的 H.264 编码器（libx264），请确认 ffmpeg 安装完整"
+                            ));
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            match Self::try_open_encoder(
+                &codec,
+                *candidate,
+                width,
+                height,
+                frame_rate,
+                global_header,
+            ) {
+                Ok((encoder, encoder_time_base, hw_setup)) => {
+                    let mut ost =
+                        octx.add_stream(codec).context("添加视频流到输出文件失败")?;
+                    let ost_index = ost.index();
+                    ost.set_parameters(&encoder);
+
+                    let (sw_dst_pix, sw_dst_buffer) = if hw_setup.is_some() {
+                        (ffmpeg::util::format::Pixel::NV12, false)
+                    } else {
+                        (ffmpeg::util::format::Pixel::YUV420P, true)
+                    };
+
+                    let sw_scaler = ffmpeg::software::scaling::context::Context::get(
+                        ffmpeg::util::format::Pixel::RGB24,
+                        width,
+                        height,
+                        sw_dst_pix,
+                        width,
+                        height,
+                        ffmpeg::software::scaling::flag::Flags::empty(),
+                    )
+                    .context("创建像素格式转换器失败（RGB → 编码像素格式）")?;
+
+                    let sw_frame_rgb = ffmpeg::frame::Video::new(
+                        ffmpeg::util::format::Pixel::RGB24,
+                        width,
+                        height,
+                    );
+
+                    let mut sw_frame_yuv =
+                        ffmpeg::frame::Video::new(sw_dst_pix, width, height);
+                    if sw_dst_buffer {
+                        unsafe {
+                            ffmpeg::ffi::av_frame_get_buffer(
+                                sw_frame_yuv.as_mut_ptr(),
+                                0,
+                            );
+                        }
+                    }
+
+                    octx.write_header().context("写入输出文件头失败")?;
+
+                    return Ok(Self {
+                        output: octx,
+                        encoder,
+                        ost_index,
+                        encoder_time_base,
+                        frame_count: 0,
+                        sw_scaler,
+                        sw_frame_rgb,
+                        sw_frame_yuv,
+                        hw_setup,
+                    });
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                }
+            }
+        }
+
+        Err(last_err.unwrap_or_else(|| anyhow!("未能找到任何可用的视频编码器")))
+    }
+
+    fn try_open_encoder(
+        codec: &ffmpeg::Codec,
+        hw_codec: Option<hw::HwCodec>,
+        width: u32,
+        height: u32,
+        frame_rate: f32,
+        global_header: bool,
+    ) -> Result<(
+        ffmpeg::encoder::Video,
+        ffmpeg::Rational,
+        Option<hw::HwSetup>,
+    )> {
+        let ctx = ffmpeg::codec::context::Context::new_with_codec(*codec);
+        let mut encoder =
+            ctx.encoder().video().context("创建视频编码器上下文失败")?;
 
         encoder.set_width(width);
         encoder.set_height(height);
-        encoder.set_format(ffmpeg::util::format::Pixel::YUV420P);
         encoder.set_frame_rate(Some((frame_rate.round() as i32, 1)));
         encoder.set_time_base(ffmpeg::util::mathematics::rescale::TIME_BASE);
-
         if global_header {
             encoder.set_flags(ffmpeg::codec::flag::Flags::GLOBAL_HEADER);
         }
 
-        let encoder = encoder
-            .open()
-            .map_err(|e| anyhow!("打开 H.264 编码器失败: {e:?}"))?;
+        let hw_setup = if let Some(hwc) = hw_codec {
+            encoder.set_format(hwc.hw_pixel_rust());
+            let setup = unsafe {
+                hw::try_create_hardware_setup(hwc, width as i32, height as i32)
+            }
+            .with_context(|| format!("创建 {} 硬件帧上下文失败", hwc.encoder_name()))?;
+            unsafe {
+                (*encoder.as_mut_ptr()).hw_frames_ctx =
+                    ffmpeg::ffi::av_buffer_ref(setup.frames_ref);
+            }
+            Some(setup)
+        } else {
+            encoder.set_format(ffmpeg::util::format::Pixel::YUV420P);
+            None
+        };
+
+        let encoder = encoder.open().map_err(|e| {
+            anyhow!(
+                "打开 {} 编码器失败: {e:?}",
+                hw_codec.map_or("libx264", |c| c.encoder_name())
+            )
+        })?;
         let encoder_time_base = encoder.time_base();
 
-        ost.set_parameters(&encoder);
-
-        let scaler = ffmpeg::software::scaling::context::Context::get(
-            ffmpeg::util::format::Pixel::RGB24,
-            width,
-            height,
-            ffmpeg::util::format::Pixel::YUV420P,
-            width,
-            height,
-            ffmpeg::software::scaling::flag::Flags::empty(),
-        )
-        .context("创建像素格式转换器失败（RGB → YUV420P）")?;
-
-        let src_frame =
-            ffmpeg::frame::Video::new(ffmpeg::util::format::Pixel::RGB24, width, height);
-
-        let mut dst_frame =
-            ffmpeg::frame::Video::new(ffmpeg::util::format::Pixel::YUV420P, width, height);
-        unsafe {
-            ffmpeg::ffi::av_frame_get_buffer(dst_frame.as_mut_ptr(), 0);
-        }
-
-        octx.write_header().context("写入输出文件头失败")?;
-
-        Ok(Self {
-            output: octx,
-            encoder,
-            scaler,
-            ost_index,
-            encoder_time_base,
-            src_frame,
-            dst_frame,
-            frame_count: 0,
-        })
+        Ok((encoder, encoder_time_base, hw_setup))
     }
 
     fn encode(&mut self, image: &RgbImage, timestamp_secs: f64) -> Result<()> {
@@ -105,8 +222,8 @@ impl FfmpegEncoder {
 
         unsafe {
             ffmpeg::ffi::av_image_fill_arrays(
-                (*self.src_frame.as_mut_ptr()).data.as_mut_ptr(),
-                (*self.src_frame.as_mut_ptr()).linesize.as_mut_ptr(),
+                (*self.sw_frame_rgb.as_mut_ptr()).data.as_mut_ptr(),
+                (*self.sw_frame_rgb.as_mut_ptr()).linesize.as_mut_ptr(),
                 raw.as_ptr(),
                 ffmpeg::util::format::Pixel::RGB24.into(),
                 width as i32,
@@ -114,28 +231,63 @@ impl FfmpegEncoder {
                 1,
             );
         }
-        self.src_frame.set_width(width);
-        self.src_frame.set_height(height);
+        self.sw_frame_rgb.set_width(width);
+        self.sw_frame_rgb.set_height(height);
 
         let tb_num = self.encoder_time_base.numerator() as f64;
         let tb_den = self.encoder_time_base.denominator() as f64;
         let pts = (timestamp_secs * tb_den / tb_num).round() as i64;
-        self.src_frame.set_pts(Some(pts));
+        self.sw_frame_rgb.set_pts(Some(pts));
 
-        self.scaler
-            .run(&self.src_frame, &mut self.dst_frame)
+        self.sw_scaler
+            .run(&self.sw_frame_rgb, &mut self.sw_frame_yuv)
             .context("帧像素格式缩放失败")?;
-        self.dst_frame.set_pts(Some(pts));
 
-        if self.frame_count.is_multiple_of(12) {
-            self.dst_frame.set_kind(ffmpeg::util::picture::Type::I);
+        if let Some(ref hw_setup) = self.hw_setup {
+            let mut hw_frame = ffmpeg::frame::Video::empty();
+            unsafe {
+                let ret = ffmpeg::ffi::av_hwframe_get_buffer(
+                    hw_setup.frames_ref,
+                    hw_frame.as_mut_ptr(),
+                    0,
+                );
+                if ret < 0 {
+                    return Err(anyhow!("从硬件帧池分配帧失败: 错误码 {}", ret));
+                }
+
+                let ret = ffmpeg::ffi::av_hwframe_transfer_data(
+                    hw_frame.as_mut_ptr(),
+                    self.sw_frame_yuv.as_ptr(),
+                    0,
+                );
+                if ret < 0 {
+                    return Err(anyhow!("帧数据上传到 GPU 失败: 错误码 {}", ret));
+                }
+            }
+            hw_frame.set_pts(Some(pts));
+
+            if self.frame_count.is_multiple_of(12) {
+                hw_frame.set_kind(ffmpeg::util::picture::Type::I);
+            }
+
+            self.frame_count += 1;
+
+            self.encoder
+                .send_frame(&hw_frame)
+                .context("发送帧到硬件编码器失败")?;
+        } else {
+            self.sw_frame_yuv.set_pts(Some(pts));
+
+            if self.frame_count.is_multiple_of(12) {
+                self.sw_frame_yuv.set_kind(ffmpeg::util::picture::Type::I);
+            }
+
+            self.frame_count += 1;
+
+            self.encoder
+                .send_frame(&self.sw_frame_yuv)
+                .context("发送帧到 H.264 编码器失败")?;
         }
-
-        self.frame_count += 1;
-
-        self.encoder
-            .send_frame(&self.dst_frame)
-            .context("发送帧到 H.264 编码器失败")?;
 
         self.receive_and_write()
             .with_context(|| format!("接收并写入编码包失败 (帧 #{})", self.frame_count))?;
@@ -205,9 +357,7 @@ impl FfmpegEncoder {
     }
 }
 
-unsafe impl Send for FfmpegEncoder {}
-
-pub fn video_process(
+pub(crate) fn video_process(
     mut decoder: VideoDecoder,
     mut encoder: FfmpegEncoder,
     mut danmakus: Vec<Danmaku>,
@@ -673,58 +823,6 @@ fn draw_scroll_danmukus(
     }
 }
 
-fn rail_hs(line_height: u32, rail_cnt: u32) -> impl Iterator<Item = i64> {
-    std::iter::successors(Some(0i64), move |prev| {
-        let next = prev + line_height as i64;
-        if next < (rail_cnt * line_height) as i64 {
-            Some(next)
-        } else {
-            None
-        }
-    })
-}
-
-fn blit_cached_text(frame: &mut RgbImage, sprite: &RgbaImage, x: i32, y: i32, opacity: f64) {
-    let o256 = (opacity * 256.0).round() as u32;
-    if o256 == 0 {
-        return;
-    }
-    let (sw, sh) = sprite.dimensions();
-    let (fw, fh) = frame.dimensions();
-    let clip_x1 = x.max(0) as u32;
-    let clip_y1 = y.max(0) as u32;
-    let clip_x2 = ((x + sw as i32).max(0) as u32).min(fw);
-    let clip_y2 = ((y + sh as i32).max(0) as u32).min(fh);
-    if clip_x1 >= clip_x2 || clip_y1 >= clip_y2 {
-        return;
-    }
-    let frame_stride = fw as usize * 3;
-    let sprite_stride = sw as usize * 4;
-    let frame_buf = frame.as_mut();
-    let sprite_buf = sprite.as_raw();
-    for fy in clip_y1..clip_y2 {
-        let sy = (fy as i32 - y) as u32;
-        let frame_row_start = fy as usize * frame_stride;
-        let sprite_row_start = sy as usize * sprite_stride;
-        for fx in clip_x1..clip_x2 {
-            let sx = (fx as i32 - x) as u32;
-            let si = sprite_row_start + sx as usize * 4;
-            let sa = sprite_buf[si + 3] as u32;
-            if sa == 0 {
-                continue;
-            }
-            let ea = sa * o256 / 256;
-            let inv_ea = 256 - ea;
-            let fi = frame_row_start + fx as usize * 3;
-            frame_buf[fi] = ((sprite_buf[si] as u32 * ea + frame_buf[fi] as u32 * inv_ea) / 256) as u8;
-            frame_buf[fi + 1] =
-                ((sprite_buf[si + 1] as u32 * ea + frame_buf[fi + 1] as u32 * inv_ea) / 256) as u8;
-            frame_buf[fi + 2] =
-                ((sprite_buf[si + 2] as u32 * ea + frame_buf[fi + 2] as u32 * inv_ea) / 256) as u8;
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 struct NormalComponent {
     x: i64,
@@ -735,9 +833,10 @@ struct NormalComponent {
     cached_text: Option<RgbaImage>,
 }
 
-pub fn same_specifications(
+pub(crate) fn same_specifications(
     decoder: &VideoDecoder,
     path: impl AsRef<Path>,
+    encoder_pref: EncoderPref,
 ) -> anyhow::Result<(FfmpegEncoder, f64)> {
     let path = path.as_ref();
 
@@ -746,7 +845,7 @@ pub fn same_specifications(
     if frame_rate <= 0.0 {
         return Err(anyhow!("视频帧率无效: {frame_rate}，无法确定每帧持续时间"));
     }
-    let encoder = FfmpegEncoder::new(path, width, height, frame_rate)?;
+    let encoder = FfmpegEncoder::new(path, width, height, frame_rate, encoder_pref)?;
 
     let frame_duration_secs = 1.0 / frame_rate as f64;
 
@@ -768,5 +867,268 @@ fn render_progress(current: u64, total: u64) {
             "░".repeat(empty),
             pct,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::{blit_cached_text, rail_hs};
+    use image::{Rgb, RgbImage, RgbaImage};
+
+    #[test]
+    fn test_rail_hs_basic() {
+        let positions: Vec<i64> = rail_hs(30, 3).collect();
+        assert_eq!(positions, vec![0, 30, 60]);
+    }
+
+    #[test]
+    fn test_rail_hs_single() {
+        let positions: Vec<i64> = rail_hs(10, 1).collect();
+        assert_eq!(positions, vec![0]);
+    }
+
+    #[test]
+    fn test_rail_hs_zero_rails() {
+        let positions: Vec<i64> = rail_hs(10, 0).collect();
+        assert_eq!(positions, vec![0]);
+    }
+
+    #[test]
+    fn test_rail_hs_large() {
+        let positions: Vec<i64> = rail_hs(5, 4).collect();
+        assert_eq!(positions, vec![0, 5, 10, 15]);
+    }
+
+    #[test]
+    fn test_blit_cached_text_full_opacity() {
+        let mut frame = RgbImage::new(4, 4);
+        frame.fill(0);
+
+        let mut sprite = RgbaImage::new(2, 2);
+        sprite.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        sprite.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+        sprite.put_pixel(0, 1, image::Rgba([0, 0, 255, 255]));
+        sprite.put_pixel(1, 1, image::Rgba([128, 128, 128, 255]));
+
+        blit_cached_text(&mut frame, &sprite, 0, 0, 1.0);
+
+        let p0 = frame.get_pixel(0, 0);
+        assert!(p0.0[0] >= 254, "red near 255");
+        assert_eq!(p0.0[1], 0);
+        assert_eq!(p0.0[2], 0);
+
+        let p1 = frame.get_pixel(1, 0);
+        assert_eq!(p1.0[0], 0);
+        assert!(p1.0[1] >= 254, "green near 255");
+        assert_eq!(p1.0[2], 0);
+
+        assert_eq!(frame.get_pixel(0, 1), &image::Rgb([0, 0, 254]));
+        assert_eq!(frame.get_pixel(1, 1), &image::Rgb([127, 127, 127]));
+    }
+
+    #[test]
+    fn test_blit_cached_text_zero_opacity() {
+        let mut frame = RgbImage::new(2, 2);
+        frame.put_pixel(0, 0, image::Rgb([100, 100, 100]));
+
+        let mut sprite = RgbaImage::new(2, 2);
+        sprite.put_pixel(0, 0, image::Rgba([255, 255, 255, 255]));
+
+        blit_cached_text(&mut frame, &sprite, 0, 0, 0.0);
+
+        assert_eq!(frame.get_pixel(0, 0), &image::Rgb([100, 100, 100]));
+    }
+
+    #[test]
+    fn test_blit_cached_text_partial_opacity() {
+        let mut frame = RgbImage::new(1, 1);
+        frame.put_pixel(0, 0, image::Rgb([255, 255, 255]));
+
+        let mut sprite = RgbaImage::new(1, 1);
+        sprite.put_pixel(0, 0, image::Rgba([0, 0, 0, 255]));
+
+        blit_cached_text(&mut frame, &sprite, 0, 0, 0.5);
+
+        let pixel = frame.get_pixel(0, 0);
+        let v = pixel.0[0] as u32;
+        assert!(v > 120 && v < 135);
+    }
+
+    #[test]
+    fn test_blit_cached_text_transparent_sprite_pixels_are_skipped() {
+        let mut frame = RgbImage::new(2, 2);
+        frame.put_pixel(0, 0, image::Rgb([10, 20, 30]));
+
+        let mut sprite = RgbaImage::new(1, 1);
+        sprite.put_pixel(0, 0, image::Rgba([255, 0, 0, 0])); // fully transparent
+
+        blit_cached_text(&mut frame, &sprite, 0, 0, 1.0);
+
+        assert_eq!(frame.get_pixel(0, 0), &image::Rgb([10, 20, 30]));
+    }
+
+    #[test]
+    fn test_blit_cached_text_clipping_outside_frame() {
+        let mut frame = RgbImage::new(2, 2);
+        frame.fill(0);
+
+        let mut sprite = RgbaImage::new(2, 2);
+        sprite.fill(255);
+
+        blit_cached_text(&mut frame, &sprite, -2, -2, 1.0);
+
+        assert_eq!(frame.get_pixel(0, 0), &image::Rgb([0, 0, 0]));
+    }
+
+    #[test]
+    fn test_blit_cached_text_partial_clipping() {
+        let mut frame = RgbImage::new(2, 2);
+        frame.fill(0);
+
+        let mut sprite = RgbaImage::new(2, 2);
+        sprite.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        sprite.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+        sprite.put_pixel(0, 1, image::Rgba([0, 0, 255, 255]));
+        sprite.put_pixel(1, 1, image::Rgba([128, 128, 128, 255]));
+
+        blit_cached_text(&mut frame, &sprite, -1, -1, 1.0);
+
+        let p = frame.get_pixel(0, 0);
+        assert!(p.0[0] >= 127 && p.0[0] <= 128, "gray near 128, got {:?}", p.0);
+        assert!(p.0[1] >= 127 && p.0[1] <= 128);
+        assert!(p.0[2] >= 127 && p.0[2] <= 128);
+        assert_eq!(frame.get_pixel(1, 0), &image::Rgb([0, 0, 0]));
+    }
+
+    #[test]
+    fn test_scroll_to_left() {
+        let mut comp = NormalComponent {
+            x: 100,
+            y: Some(0),
+            width: 10,
+            height: 10,
+            dead_line: Duration::ZERO,
+            cached_text: None,
+        };
+        scroll(std::iter::once(&mut comp), Direction::ToLeft, 3);
+        assert_eq!(comp.x, 97);
+    }
+
+    #[test]
+    fn test_scroll_to_right() {
+        let mut comp = NormalComponent {
+            x: 100,
+            y: Some(0),
+            width: 10,
+            height: 10,
+            dead_line: Duration::ZERO,
+            cached_text: None,
+        };
+        scroll(std::iter::once(&mut comp), Direction::ToRight, 5);
+        assert_eq!(comp.x, 105);
+    }
+
+    #[test]
+    fn test_scroll_only_active() {
+        let mut comp1 = NormalComponent {
+            x: 100,
+            y: Some(10),
+            width: 10,
+            height: 10,
+            dead_line: Duration::ZERO,
+            cached_text: None,
+        };
+        let mut comp2 = NormalComponent {
+            x: 200,
+            y: None,
+            width: 10,
+            height: 10,
+            dead_line: Duration::ZERO,
+            cached_text: None,
+        };
+
+        let comps: Vec<&mut NormalComponent> =
+            vec![&mut comp1, &mut comp2];
+        let active = comps.into_iter().filter(|c| c.y.is_some());
+        scroll(active, Direction::ToLeft, 2);
+
+        assert_eq!(comp1.x, 98);
+        assert_eq!(comp2.x, 200); // y is None, so it shouldn't be iterated
+    }
+
+    #[test]
+    fn test_del_dead_removes_expired() {
+        let dan = Danmaku {
+            time: Duration::from_secs(0),
+            mode: DanmakuMode::Scroll,
+            font_size: 25,
+            color: Rgb([255, 0, 0]),
+            text: "test".into(),
+        };
+        let comp = NormalComponent {
+            x: 0,
+            y: None,
+            width: 10,
+            height: 10,
+            dead_line: Duration::from_secs(10),
+            cached_text: None,
+        };
+
+        let mut slots = GrowableVec::new(None);
+        slots[0] = Some((dan.clone(), comp.clone()));
+
+        del_dead(&mut slots, Duration::from_secs(11));
+        assert!(slots[0].is_none());
+    }
+
+    #[test]
+    fn test_del_dead_keeps_active() {
+        let dan = Danmaku {
+            time: Duration::from_secs(0),
+            mode: DanmakuMode::Scroll,
+            font_size: 25,
+            color: Rgb([255, 0, 0]),
+            text: "test".into(),
+        };
+        let comp = NormalComponent {
+            x: 0,
+            y: None,
+            width: 10,
+            height: 10,
+            dead_line: Duration::from_secs(10),
+            cached_text: None,
+        };
+
+        let mut slots = GrowableVec::new(None);
+        slots[0] = Some((dan.clone(), comp));
+
+        del_dead(&mut slots, Duration::from_secs(9));
+        assert!(slots[0].is_some());
+    }
+
+    #[test]
+    fn test_del_dead_exact_deadline() {
+        let dan = Danmaku {
+            time: Duration::from_secs(0),
+            mode: DanmakuMode::Scroll,
+            font_size: 25,
+            color: Rgb([255, 0, 0]),
+            text: "test".into(),
+        };
+        let comp = NormalComponent {
+            x: 0,
+            y: None,
+            width: 10,
+            height: 10,
+            dead_line: Duration::from_secs(10),
+            cached_text: None,
+        };
+
+        let mut slots = GrowableVec::new(None);
+        slots[0] = Some((dan, comp));
+
+        del_dead(&mut slots, Duration::from_secs(10));
+        assert!(slots[0].is_none());
     }
 }

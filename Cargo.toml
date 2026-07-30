@@ -27,9 +27,20 @@ env_logger = "0.11"
 dhat = { version = "0.3.3", optional = true }
 bit-set = "0.11.1"
 crossbeam-channel = "0.5.16"
+mimalloc = { version = "0.1.52", default-features = false }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "blit_bench"
+harness = false
 
 [profile.release]
 debug = 1
+lto = true
+codegen-units = 1
 
 [features]
-dhat-heap = []
+dhat-heap = ["dep:dhat"]
+ffmpeg-log = []

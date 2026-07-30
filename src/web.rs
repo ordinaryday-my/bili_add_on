@@ -87,3 +87,51 @@ fn client() -> anyhow::Result<&'static reqwest::blocking::Client> {
             .expect("创建HTTP客户端失败，请检查系统网络环境")
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_maybe_decompress_empty() {
+        let result = maybe_decompress(&[]).unwrap();
+        assert_eq!(result, b"");
+    }
+
+    #[test]
+    fn test_maybe_decompress_plain_text() {
+        let data = b"hello world";
+        let result = maybe_decompress(data).unwrap();
+        assert_eq!(result, data);
+    }
+
+    #[test]
+    fn test_maybe_decompress_zlib() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let original = b"<i><d p=\"1.0,1,25,16777215\">hello</d></i>";
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(original).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let result = maybe_decompress(&compressed).unwrap();
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn test_maybe_decompress_raw_deflate() {
+        use flate2::write::DeflateEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let original = b"<i><d>test</d></i>";
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(original).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let result = maybe_decompress(&compressed).unwrap();
+        assert_eq!(result, original);
+    }
+}

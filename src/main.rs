@@ -2,9 +2,11 @@ use std::{fs, process::exit, time::Instant};
 
 use anyhow::{anyhow, Context};
 use clap::Parser;
+#[cfg(not(feature = "dhat-heap"))]
+use mimalloc::MiMalloc;
 
 use crate::{
-    core::{same_specifications, video_process},
+    core::{same_specifications, video_process, EncoderPref},
     danmaku::{get_danmuku_xml_by_bili_id, get_danmuku_xml_from_file, parse_danmakus},
     decoder::VideoDecoder,
     interaction::Args,
@@ -14,6 +16,7 @@ mod audio;
 mod core;
 mod danmaku;
 mod decoder;
+mod hw;
 mod interaction;
 mod utils;
 mod web;
@@ -21,6 +24,10 @@ mod web;
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
+
+#[cfg(not(feature = "dhat-heap"))]
+#[global_allocator]
+static ALLOC: MiMalloc = MiMalloc;
 
 fn main() {
     #[cfg(feature = "dhat-heap")]
@@ -58,8 +65,13 @@ fn run() -> anyhow::Result<()> {
     ffmpeg_next::init()
         .map_err(|e| anyhow!("{e}"))
         .context("视频编解码器初始化失败，请确认 ffmpeg 已正确安装且版本兼容")?;
+    #[cfg(not(feature = "ffmpeg-log"))]
     unsafe {
-        ffmpeg_next::ffi::av_log_set_level(ffmpeg_next::ffi::AV_LOG_ERROR);
+        ffmpeg_next::ffi::av_log_set_level(ffmpeg_next::ffi::AV_LOG_FATAL);
+    }
+    #[cfg(feature = "ffmpeg-log")]
+    unsafe {
+        ffmpeg_next::ffi::av_log_set_level(ffmpeg_next::ffi::AV_LOG_INFO);
     }
     if !args.quiet {
         eprintln!("编解码器已就绪");
@@ -80,8 +92,18 @@ fn run() -> anyhow::Result<()> {
 
     let decoder = VideoDecoder::new(&args.input)
         .with_context(|| format!("视频解码器创建失败，无法解码源文件: {}", args.input.display()))?;
+
+    let encoder_pref = match args.encoder.as_str() {
+        "auto" => EncoderPref::Auto,
+        "software" => EncoderPref::Software,
+        name => match hw::HwCodec::from_cli(name) {
+            Some(c) => EncoderPref::Specific(c),
+            None => unreachable!("encoder 校验已保证值有效"),
+        },
+    };
+
     let (encoder, frame_duration) =
-        same_specifications(&decoder, &temp_path)
+        same_specifications(&decoder, &temp_path, encoder_pref)
             .with_context(|| format!("视频编码器创建失败，无法写入临时文件: {}", temp_path.display()))?;
 
     if !args.quiet {

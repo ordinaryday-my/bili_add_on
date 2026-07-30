@@ -3,7 +3,7 @@ use std::{
     ops::{Index, IndexMut},
 };
 
-use image::Rgb;
+use image::{Rgb, RgbImage, RgbaImage};
 
 pub type IntoIter<T> = std::vec::IntoIter<T>;
 
@@ -150,5 +150,244 @@ impl<T> Ignore for T {
         Self: Sized,
     {
         drop(self);
+    }
+}
+
+pub fn rail_hs(line_height: u32, rail_cnt: u32) -> impl Iterator<Item = i64> {
+    std::iter::successors(Some(0i64), move |prev| {
+        let next = prev + line_height as i64;
+        if next < (rail_cnt * line_height) as i64 {
+            Some(next)
+        } else {
+            None
+        }
+    })
+}
+
+pub fn blit_cached_text(frame: &mut RgbImage, sprite: &RgbaImage, x: i32, y: i32, opacity: f64) {
+    let o256 = (opacity * 256.0).round() as u32;
+    if o256 == 0 {
+        return;
+    }
+    let (sw, sh) = sprite.dimensions();
+    let (fw, fh) = frame.dimensions();
+    let clip_x1 = x.max(0) as u32;
+    let clip_y1 = y.max(0) as u32;
+    let clip_x2 = ((x + sw as i32).max(0) as u32).min(fw);
+    let clip_y2 = ((y + sh as i32).max(0) as u32).min(fh);
+    if clip_x1 >= clip_x2 || clip_y1 >= clip_y2 {
+        return;
+    }
+    let frame_stride = fw as usize * 3;
+    let sprite_stride = sw as usize * 4;
+    let frame_buf = frame.as_mut();
+    let sprite_buf = sprite.as_raw();
+    for fy in clip_y1..clip_y2 {
+        let sy = (fy as i32 - y) as u32;
+        let frame_row_start = fy as usize * frame_stride;
+        let sprite_row_start = sy as usize * sprite_stride;
+        for fx in clip_x1..clip_x2 {
+            let sx = (fx as i32 - x) as u32;
+            let si = sprite_row_start + sx as usize * 4;
+            let sa = sprite_buf[si + 3] as u32;
+            if sa == 0 {
+                continue;
+            }
+            let ea = sa * o256 / 256;
+            let inv_ea = 256 - ea;
+            let fi = frame_row_start + fx as usize * 3;
+            frame_buf[fi] = ((sprite_buf[si] as u32 * ea + frame_buf[fi] as u32 * inv_ea) / 256) as u8;
+            frame_buf[fi + 1] =
+                ((sprite_buf[si + 1] as u32 * ea + frame_buf[fi + 1] as u32 * inv_ea) / 256) as u8;
+            frame_buf[fi + 2] =
+                ((sprite_buf[si + 2] as u32 * ea + frame_buf[fi + 2] as u32 * inv_ea) / 256) as u8;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::borrow::Cow;
+
+    #[test]
+    fn test_decode_rgb_white() {
+        assert_eq!(decode_rgb(0xFFFFFF), Rgb([255, 255, 255]));
+    }
+
+    #[test]
+    fn test_decode_rgb_black() {
+        assert_eq!(decode_rgb(0x000000), Rgb([0, 0, 0]));
+    }
+
+    #[test]
+    fn test_decode_rgb_red() {
+        assert_eq!(decode_rgb(0xFF0000), Rgb([255, 0, 0]));
+    }
+
+    #[test]
+    fn test_decode_rgb_bilibili_white() {
+        assert_eq!(decode_rgb(16777215), Rgb([255, 255, 255]));
+    }
+
+    #[test]
+    fn test_decode_rgb_green() {
+        assert_eq!(decode_rgb(0x00FF00), Rgb([0, 255, 0]));
+    }
+
+    #[test]
+    fn test_decode_rgb_blue() {
+        assert_eq!(decode_rgb(0x0000FF), Rgb([0, 0, 255]));
+    }
+
+    #[test]
+    fn test_cow_u8_to_str_valid_utf8() {
+        let input = Cow::Borrowed("hello".as_bytes());
+        let result = cow_u8_to_str(input).unwrap();
+        assert_eq!(result, Cow::Borrowed("hello"));
+    }
+
+    #[test]
+    fn test_cow_u8_to_str_invalid_utf8() {
+        let input = Cow::Borrowed(&[0xFF, 0xFE, 0xFD][..]);
+        assert!(cow_u8_to_str(input).is_err());
+    }
+
+    #[test]
+    fn test_cow_u8_to_str_owned() {
+        let input = Cow::Owned(b"world".to_vec());
+        let result = cow_u8_to_str(input).unwrap();
+        assert_eq!(result, Cow::<'_, str>::Owned("world".to_string()));
+    }
+
+    #[test]
+    fn test_decode_bytes_utf8() {
+        let result = decode_bytes("你好世界".as_bytes(), "text/plain").unwrap();
+        assert_eq!(result, "你好世界");
+    }
+
+    #[test]
+    fn test_decode_bytes_gbk_declared() {
+        let input: Vec<u8> = vec![0xCE, 0xD2, 0xCA, 0xC7]; // "我是" in GBK
+        let result = decode_bytes(&input, "text/xml; charset=gbk").unwrap();
+        assert_eq!(result, "我是");
+    }
+
+    #[test]
+    fn test_growable_vec_new_and_len() {
+        let gv = GrowableVec::<i32>::new(0);
+        assert_eq!(gv.len(), 0);
+    }
+
+    #[test]
+    fn test_growable_vec_index_mut_auto_grows() {
+        let mut gv = GrowableVec::new(-1);
+        gv[3] = 42;
+        assert_eq!(gv.len(), 4);
+        assert_eq!(gv[0], -1);
+        assert_eq!(gv[1], -1);
+        assert_eq!(gv[2], -1);
+        assert_eq!(gv[3], 42);
+    }
+
+    #[test]
+    fn test_growable_vec_iter() {
+        let mut gv = GrowableVec::new(0);
+        gv[0] = 10;
+        gv[1] = 20;
+        let collected: Vec<_> = gv.iter().copied().collect();
+        assert_eq!(collected, vec![10, 20]);
+    }
+
+    #[test]
+    fn test_growable_vec_first_empty_all_none() {
+        let mut gv = GrowableVec::<Option<i32>>::new(None);
+        gv[2] = None;
+        let slot = gv.first_empty();
+        assert!(slot.is_none());
+    }
+
+    #[test]
+    fn test_growable_vec_set_first_empty() {
+        let mut gv = GrowableVec::<Option<i32>>::new(None);
+        gv[0] = Some(10);
+        let slot = gv.set_first_empty(99);
+        assert_eq!(*slot, Some(99));
+        assert_eq!(gv[0], Some(10));
+        assert_eq!(gv[1], Some(99));
+    }
+
+    #[test]
+    fn test_growable_vec_set_first_empty_reuses_slot() {
+        let mut gv = GrowableVec::<Option<i32>>::new(None);
+        gv[0] = Some(1);
+        gv[1] = Some(2);
+        gv[1] = None; // clear slot 1
+        let slot = gv.set_first_empty(3);
+        assert_eq!(*slot, Some(3));
+        assert_eq!(gv[0], Some(1));
+        assert_eq!(gv[1], Some(3));
+    }
+
+    #[test]
+    fn test_growable_vec_from_iter() {
+        let gv: GrowableVec<i32> = vec![1, 2, 3].into_iter().collect();
+        assert_eq!(gv.len(), 3);
+        assert_eq!(gv[0], 1);
+        assert_eq!(gv[2], 3);
+    }
+
+    #[test]
+    fn test_growable_vec_into_iter() {
+        let mut gv = GrowableVec::new(0);
+        gv[0] = 5;
+        gv[1] = 6;
+        let values: Vec<_> = gv.into_iter().collect();
+        assert_eq!(values, vec![5, 6]);
+    }
+
+    #[test]
+    fn test_growable_vec_from_vec() {
+        let v = vec![10, 20, 30];
+        let gv = GrowableVec::from(v);
+        assert_eq!(gv.len(), 3);
+        assert_eq!(gv[0], 10);
+    }
+
+    #[test]
+    fn test_rail_hs_basic() {
+        let positions: Vec<i64> = rail_hs(30, 3).collect();
+        assert_eq!(positions, vec![0, 30, 60]);
+    }
+
+    #[test]
+    fn test_rail_hs_zero_rails() {
+        let positions: Vec<i64> = rail_hs(10, 0).collect();
+        assert_eq!(positions, vec![0]);
+    }
+
+    #[test]
+    fn test_blit_cached_text_full_opacity() {
+        let mut frame = RgbImage::new(2, 2);
+        frame.fill(0);
+        let mut sprite = RgbaImage::new(2, 2);
+        sprite.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        sprite.put_pixel(1, 1, image::Rgba([0, 255, 0, 255]));
+
+        blit_cached_text(&mut frame, &sprite, 0, 0, 1.0);
+
+        let p = frame.get_pixel(0, 0);
+        assert!(p.0[0] >= 254);
+    }
+
+    #[test]
+    fn test_blit_cached_text_zero_opacity() {
+        let mut frame = RgbImage::new(2, 2);
+        frame.put_pixel(0, 0, image::Rgb([100, 100, 100]));
+        let mut sprite = RgbaImage::new(2, 2);
+        sprite.put_pixel(0, 0, image::Rgba([255, 255, 255, 255]));
+
+        blit_cached_text(&mut frame, &sprite, 0, 0, 0.0);
+        assert_eq!(frame.get_pixel(0, 0), &image::Rgb([100, 100, 100]));
     }
 }
