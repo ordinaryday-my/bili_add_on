@@ -37,9 +37,20 @@ name = "blit_bench"
 harness = false
 
 [profile.release]
-debug = 1
 lto = true
 codegen-units = 1
+panic = "abort"
+strip = "symbols"
+opt-level = 3
+
+[profile.lite-optimize]
+inherits = "release"
+debug = 1
+opt-level = 2
+strip = "none"
+lto = false
+panic = 'unwind'
+codegen-units = 16
 
 [features]
 dhat-heap = ["dep:dhat"]
