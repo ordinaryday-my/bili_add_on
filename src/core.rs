@@ -2,15 +2,15 @@ use core::panic;
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use ab_glyph::{FontVec, PxScale};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bit_set::BitSet;
 use crossbeam_channel::bounded;
 use image::{RgbImage, Rgba, RgbaImage};
@@ -24,7 +24,7 @@ use crate::{
     decoder::VideoDecoder,
     hw,
     interaction::Args,
-    utils::{blit_cached_text, rail_hs, GrowableVec, Ignore},
+    utils::{GrowableVec, Ignore, blit_cached_text, rail_hs, rgb24_to_yuv420_band_raw},
 };
 
 #[allow(dead_code)]
@@ -34,16 +34,66 @@ pub(crate) enum EncoderPref {
     Software,
 }
 
+struct StageTimings {
+    scale_us: u128,
+    upload_us: u128,
+    send_us: u128,
+    write_us: u128,
+    wait_us: u128,
+    frames: u64,
+}
+
+impl StageTimings {
+    fn new() -> Self {
+        Self {
+            scale_us: 0,
+            upload_us: 0,
+            send_us: 0,
+            write_us: 0,
+            wait_us: 0,
+            frames: 0,
+        }
+    }
+
+    fn report(&self) {
+        if self.frames == 0 {
+            return;
+        }
+        let total_us = self.scale_us + self.upload_us + self.send_us + self.write_us;
+        let pct = |v: u128| -> f32 {
+            if total_us > 0 {
+                v as f32 / total_us as f32 * 100.0
+            } else {
+                0.0
+            }
+        };
+        eprintln!(
+            "[timing] frames={} avg_total={:.3}ms avg_wait={:.3}ms | scale={:.3}ms({:.0}%) upload={:.3}ms({:.0}%) send={:.3}ms({:.0}%) write={:.3}ms({:.0}%)",
+            self.frames,
+            total_us as f64 / self.frames as f64 / 1000.0,
+            self.wait_us as f64 / self.frames as f64 / 1000.0,
+            self.scale_us as f64 / self.frames as f64 / 1000.0,
+            pct(self.scale_us),
+            self.upload_us as f64 / self.frames as f64 / 1000.0,
+            pct(self.upload_us),
+            self.send_us as f64 / self.frames as f64 / 1000.0,
+            pct(self.send_us),
+            self.write_us as f64 / self.frames as f64 / 1000.0,
+            pct(self.write_us),
+        );
+    }
+}
+
 pub(crate) struct FfmpegEncoder {
     output: ffmpeg::format::context::Output,
     encoder: ffmpeg::encoder::Video,
     ost_index: usize,
     encoder_time_base: ffmpeg::Rational,
     frame_count: u64,
-    sw_scaler: ffmpeg::software::scaling::context::Context,
-    sw_frame_rgb: ffmpeg::frame::Video,
     sw_frame_yuv: ffmpeg::frame::Video,
+    yuv_scratch: Vec<u8>,
     hw_setup: Option<hw::HwSetup>,
+    timings: StageTimings,
 }
 
 unsafe impl Send for FfmpegEncoder {}
@@ -113,35 +163,13 @@ impl FfmpegEncoder {
                     let ost_index = ost.index();
                     ost.set_parameters(&encoder);
 
-                    let (sw_dst_pix, sw_dst_buffer) = if hw_setup.is_some() {
-                        (ffmpeg::util::format::Pixel::NV12, false)
+                    let sw_dst_pix = if hw_setup.is_some() {
+                        ffmpeg::util::format::Pixel::NV12
                     } else {
-                        (ffmpeg::util::format::Pixel::YUV420P, true)
+                        ffmpeg::util::format::Pixel::YUV420P
                     };
 
-                    let sw_scaler = ffmpeg::software::scaling::context::Context::get(
-                        ffmpeg::util::format::Pixel::RGB24,
-                        width,
-                        height,
-                        sw_dst_pix,
-                        width,
-                        height,
-                        ffmpeg::software::scaling::flag::Flags::empty(),
-                    )
-                    .context("创建像素格式转换器失败（RGB → 编码像素格式）")?;
-
-                    let sw_frame_rgb = ffmpeg::frame::Video::new(
-                        ffmpeg::util::format::Pixel::RGB24,
-                        width,
-                        height,
-                    );
-
-                    let mut sw_frame_yuv = ffmpeg::frame::Video::new(sw_dst_pix, width, height);
-                    if sw_dst_buffer {
-                        unsafe {
-                            ffmpeg::ffi::av_frame_get_buffer(sw_frame_yuv.as_mut_ptr(), 0);
-                        }
-                    }
+                    let sw_frame_yuv = ffmpeg::frame::Video::new(sw_dst_pix, width, height);
 
                     octx.write_header().context("写入输出文件头失败")?;
 
@@ -151,10 +179,10 @@ impl FfmpegEncoder {
                         ost_index,
                         encoder_time_base,
                         frame_count: 0,
-                        sw_scaler,
-                        sw_frame_rgb,
                         sw_frame_yuv,
+                        yuv_scratch: vec![0u8; width as usize * height as usize * 3 / 2],
                         hw_setup,
+                        timings: StageTimings::new(),
                     });
                 }
                 Err(e) => {
@@ -218,32 +246,76 @@ impl FfmpegEncoder {
 
     fn encode(&mut self, image: &RgbImage, timestamp_secs: f64) -> Result<()> {
         let (width, height) = image.dimensions();
+        let w = width as usize;
+        let h = height as usize;
         let raw = image.as_raw();
-
-        unsafe {
-            ffmpeg::ffi::av_image_fill_arrays(
-                (*self.sw_frame_rgb.as_mut_ptr()).data.as_mut_ptr(),
-                (*self.sw_frame_rgb.as_mut_ptr()).linesize.as_mut_ptr(),
-                raw.as_ptr(),
-                ffmpeg::util::format::Pixel::RGB24.into(),
-                width as i32,
-                height as i32,
-                1,
-            );
-        }
-        self.sw_frame_rgb.set_width(width);
-        self.sw_frame_rgb.set_height(height);
 
         let tb_num = self.encoder_time_base.numerator() as f64;
         let tb_den = self.encoder_time_base.denominator() as f64;
         let pts = (timestamp_secs * tb_den / tb_num).round() as i64;
-        self.sw_frame_rgb.set_pts(Some(pts));
 
-        self.sw_scaler
-            .run(&self.sw_frame_rgb, &mut self.sw_frame_yuv)
-            .context("帧像素格式缩放失败")?;
+        let t0 = Instant::now();
+        unsafe {
+            rgb24_to_yuv420_band_raw(
+                raw.as_ptr(),
+                w,
+                h,
+                0,
+                h,
+                self.yuv_scratch.as_mut_ptr(),
+                self.hw_setup.is_some(),
+            );
+        }
+        let t1 = Instant::now();
 
-        if let Some(ref hw_setup) = self.hw_setup {
+        unsafe {
+            let yuv = self.sw_frame_yuv.as_mut_ptr();
+            let scratch = self.yuv_scratch.as_ptr();
+            let y_linesize = (*yuv).linesize[0] as usize;
+            let row_bytes = w;
+            for y in 0..h {
+                std::ptr::copy_nonoverlapping(
+                    scratch.add(y * row_bytes),
+                    (*yuv).data[0].add(y * y_linesize),
+                    row_bytes,
+                );
+            }
+            let w2 = w / 2;
+            let h2 = h / 2;
+            let y_size = w * h;
+            if self.hw_setup.is_some() {
+                let uv_linesize = (*yuv).linesize[1] as usize;
+                let uv_bytes = w;
+                for by in 0..h2 {
+                    std::ptr::copy_nonoverlapping(
+                        scratch.add(y_size + by * uv_bytes),
+                        (*yuv).data[1].add(by * uv_linesize),
+                        uv_bytes,
+                    );
+                }
+            } else {
+                let uv_linesize = (*yuv).linesize[1] as usize;
+                let uv_row = w2;
+                let uv_size = w2 * h2;
+                for by in 0..h2 {
+                    std::ptr::copy_nonoverlapping(
+                        scratch.add(y_size + by * uv_row),
+                        (*yuv).data[1].add(by * uv_linesize),
+                        uv_row,
+                    );
+                    std::ptr::copy_nonoverlapping(
+                        scratch.add(y_size + uv_size + by * uv_row),
+                        (*yuv).data[2].add(by * uv_linesize),
+                        uv_row,
+                    );
+                }
+            }
+        }
+        self.sw_frame_yuv.set_width(width);
+        self.sw_frame_yuv.set_height(height);
+
+        let mut upload_done = t1;
+        let send_result = if let Some(ref hw_setup) = self.hw_setup {
             let mut hw_frame = ffmpeg::frame::Video::empty();
             unsafe {
                 let ret = ffmpeg::ffi::av_hwframe_get_buffer(
@@ -264,6 +336,7 @@ impl FfmpegEncoder {
                     return Err(anyhow!("帧数据上传到 GPU 失败: 错误码 {}", ret));
                 }
             }
+            upload_done = Instant::now();
             hw_frame.set_pts(Some(pts));
 
             if self.frame_count.is_multiple_of(12) {
@@ -274,7 +347,7 @@ impl FfmpegEncoder {
 
             self.encoder
                 .send_frame(&hw_frame)
-                .context("发送帧到硬件编码器失败")?;
+                .context("发送帧到硬件编码器失败")
         } else {
             self.sw_frame_yuv.set_pts(Some(pts));
 
@@ -286,11 +359,20 @@ impl FfmpegEncoder {
 
             self.encoder
                 .send_frame(&self.sw_frame_yuv)
-                .context("发送帧到 H.264 编码器失败")?;
-        }
+                .context("发送帧到 H.264 编码器失败")
+        };
+        let t2 = Instant::now();
+        send_result?;
 
         self.receive_and_write()
             .with_context(|| format!("接收并写入编码包失败 (帧 #{})", self.frame_count))?;
+        let t3 = Instant::now();
+
+        self.timings.scale_us += (t1 - t0).as_micros();
+        self.timings.upload_us += (upload_done - t1).as_micros();
+        self.timings.send_us += (t2 - upload_done).as_micros();
+        self.timings.write_us += (t3 - t2).as_micros();
+        self.timings.frames += 1;
 
         Ok(())
     }
@@ -314,7 +396,7 @@ impl FfmpegEncoder {
                         .context("写入编码包到输出文件失败")?;
                 }
                 Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {
-                    break
+                    break;
                 }
                 Err(ffmpeg::Error::Eof) => break,
                 Err(e) => return Err(anyhow!("编码器接收包错误: {e}")),
@@ -324,6 +406,7 @@ impl FfmpegEncoder {
     }
 
     fn finish(&mut self) -> Result<()> {
+        self.timings.report();
         self.encoder.send_eof().context("编码器发送 EOF 信号失败")?;
 
         let ost_time_base = self
@@ -388,6 +471,8 @@ fn compute_max_danmaku_deadline(
     }
     max_deadline
 }
+
+const PROGRESS_INTERVAL_MS: u64 = 100;
 
 pub(crate) fn video_process(
     mut decoder: VideoDecoder,
@@ -475,6 +560,7 @@ pub(crate) fn video_process(
         let process_pipeline = thread::Builder::new()
             .name("render".to_string())
             .spawn_scoped(s, move || -> Result<()> {
+                let mut last_progress = Instant::now() - Duration::from_millis(PROGRESS_INTERVAL_MS);
                 loop {
                     let Ok((ts_secs, dur, mut image)) = decode_r.recv() else {
                         break;
@@ -605,11 +691,13 @@ pub(crate) fn video_process(
                     }
                     frame_count += 1;
                     if !args.quiet {
-                        render_progress(
-                            frame_count,
-                            total_frames,
-                            total_reporter.load(Ordering::Relaxed),
-                        );
+                        let exact = total_reporter.load(Ordering::Relaxed);
+                        let is_final = exact > 0 && frame_count >= exact;
+                        let now = Instant::now();
+                        if is_final || now - last_progress >= Duration::from_millis(PROGRESS_INTERVAL_MS) {
+                            render_progress(frame_count, total_frames, exact);
+                            last_progress = now;
+                        }
                     }
                 }
 
@@ -620,9 +708,11 @@ pub(crate) fn video_process(
             .name("encode".to_string())
             .spawn_scoped(s, move || -> Result<()> {
                 loop {
+                    let t0 = Instant::now();
                     let Ok((image, ts_secs)) = encode_v.recv() else {
                         break;
                     };
+                    encoder.timings.wait_us += t0.elapsed().as_micros();
 
                     encoder
                         .encode(&image, ts_secs)
@@ -644,8 +734,9 @@ pub(crate) fn video_process(
             .into_iter()
             .collect();
         let handles = res.context("系统错误: 无法创建线程")?;
-        handles.into_iter().map(|handle| {
-            match handle.join() {
+        handles
+            .into_iter()
+            .map(|handle| match handle.join() {
                 Ok(res) => res,
                 Err(e) => {
                     if let Some(msg) = e.downcast_ref::<&'static str>() {
@@ -656,8 +747,8 @@ pub(crate) fn video_process(
                         panic!("线程 panic: 未知错误")
                     }
                 }
-            }
-        }).collect::<Result<Vec<_>>>()?;
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(())
     })?;
