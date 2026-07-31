@@ -46,6 +46,7 @@ bili_add_on --input input.mp4 --xml danmaku.xml
 | `--no-audio` | | `false` | 不保留输入视频的音频轨道（输出仅含画面） |
 | `--quiet` | `-q` | `false` | 静默模式，不输出进度提示 |
 | `--encoder` | | `auto` | 视频编码器，可选：`auto` / `nvenc` / `amf` / `qsv` / `software` |
+| `--longest` | | false | 自动延长视频来显示所有弹幕 |
 
 ### 硬件加速编码
 

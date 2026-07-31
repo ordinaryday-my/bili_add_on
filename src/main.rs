@@ -111,9 +111,6 @@ fn run() -> anyhow::Result<()> {
     }
     video_process(decoder, encoder, danmakus, &args, frame_duration)
         .context("视频处理流程失败（弹幕渲染到视频帧时出错）")?;
-    if !args.quiet {
-        eprintln!("视频帧渲染完成");
-    }
 
     if args.no_audio || !audio::has_audio(&args.input).unwrap_or(false) {
         fs::rename(&*temp_path, &output_path).with_context(|| {

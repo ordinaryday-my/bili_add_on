@@ -1,4 +1,10 @@
-use std::path::Path;
+use std::{
+    path::Path,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+};
 
 use anyhow::{anyhow, Context, Result};
 use ffmpeg_next as ffmpeg;
@@ -20,6 +26,14 @@ pub struct VideoDecoder {
     height: u32,
     frame_rate: f32,
     draining: bool,
+    last_ts: Option<f64>,
+    frame_interval: f64,
+    extend_max_deadline: Option<f64>,
+    extend_frame_duration: f64,
+    real_frame_count: u64,
+    extended_count: u64,
+    total_reporter: Option<Arc<AtomicU64>>,
+    total_reported: bool,
 }
 
 impl VideoDecoder {
@@ -37,7 +51,21 @@ impl VideoDecoder {
         let frame_rate = {
             let rate = stream.rate();
             if rate.denominator() > 0 {
-                rate.numerator() as f32 / rate.denominator() as f32
+                let r_frame_rate = rate.numerator() as f32 / rate.denominator() as f32;
+
+                let frames = stream.frames();
+                let raw_duration = stream.duration();
+                if frames > 0 && raw_duration > 0 {
+                    let dur_secs = raw_duration as f64 * stream_time_base.numerator() as f64
+                        / stream_time_base.denominator() as f64;
+                    if dur_secs > 0.0 {
+                        frames as f32 / dur_secs as f32
+                    } else {
+                        r_frame_rate
+                    }
+                } else {
+                    r_frame_rate
+                }
             } else {
                 0.0
             }
@@ -83,6 +111,14 @@ impl VideoDecoder {
             height,
             frame_rate,
             draining: false,
+            last_ts: None,
+            frame_interval: 0.0,
+            extend_max_deadline: None,
+            extend_frame_duration: 0.0,
+            real_frame_count: 0,
+            extended_count: 0,
+            total_reporter: None,
+            total_reported: false,
         })
     }
 
@@ -99,6 +135,15 @@ impl VideoDecoder {
             .stream(self.stream_index)
             .map(|s| s.frames().max(0) as u64)
             .unwrap_or(0)
+    }
+
+    pub fn set_extend_to(&mut self, max_deadline_secs: f64, frame_duration_secs: f64) {
+        self.extend_max_deadline = Some(max_deadline_secs);
+        self.extend_frame_duration = frame_duration_secs;
+    }
+
+    pub fn set_total_reporter(&mut self, reporter: Arc<AtomicU64>) {
+        self.total_reporter = Some(reporter);
     }
 
     pub fn next_frame_into(&mut self, reuse: &mut RgbImage) -> Result<Option<f64>> {
@@ -125,13 +170,22 @@ impl VideoDecoder {
                         })
                         .unwrap_or(0.0);
 
+                    if let Some(prev) = self.last_ts {
+                        let interval = ts_secs - prev;
+                        if interval > 0.0 {
+                            self.frame_interval = interval;
+                        }
+                    }
+                    self.last_ts = Some(ts_secs);
+                    self.real_frame_count += 1;
+
                     avframe_rgb24_to_image(&rgb, image)?;
 
                     return Ok(Some(ts_secs));
                 }
                 Err(ffmpeg::Error::Other { errno }) if errno == EAGAIN => {
                     if self.draining {
-                        return Ok(None);
+                        return self.maybe_extend(image);
                     }
                     let found = self.drain_next_packet()?;
                     if !found {
@@ -141,9 +195,59 @@ impl VideoDecoder {
                         self.draining = true;
                     }
                 }
-                Err(ffmpeg::Error::Eof) => return Ok(None),
+                Err(ffmpeg::Error::Eof) => return self.maybe_extend(image),
                 Err(e) => return Err(anyhow!("解码器接收帧错误: {e}")),
             }
+        }
+    }
+
+    fn maybe_extend(&mut self, image: &mut RgbImage) -> Result<Option<f64>> {
+        if !self.total_reported {
+            self.report_total();
+            self.total_reported = true;
+        }
+
+        if let Some(max_deadline) = self.extend_max_deadline {
+            let step = self.extension_step();
+            let stop_at = max_deadline + step.max(self.extend_frame_duration);
+            let next_ts = self.last_ts.map_or(0.0, |t| t + step);
+            if next_ts < stop_at {
+                self.last_ts = Some(next_ts);
+                self.extended_count += 1;
+                image.fill(0);
+                return Ok(Some(next_ts));
+            }
+        }
+        Ok(None)
+    }
+
+    fn extension_step(&self) -> f64 {
+        if self.frame_interval > 0.0 {
+            self.frame_interval
+        } else if self.frame_rate > 0.0 {
+            1.0 / self.frame_rate as f64
+        } else {
+            self.extend_frame_duration
+        }
+    }
+
+    fn report_total(&mut self) {
+        if let Some(reporter) = &self.total_reporter {
+            let total = if let Some(max_deadline) = self.extend_max_deadline {
+                let step = self.extension_step();
+                let stop_at =
+                    max_deadline + step.max(self.extend_frame_duration);
+                let mut extended = 0u64;
+                let mut ts = self.last_ts.map_or(0.0, |t| t);
+                while ts + step < stop_at {
+                    ts += step;
+                    extended += 1;
+                }
+                self.real_frame_count + extended
+            } else {
+                self.real_frame_count
+            };
+            reporter.store(total, Ordering::Relaxed);
         }
     }
 

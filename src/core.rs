@@ -1,4 +1,12 @@
-use std::{panic, path::Path, thread, time::Duration};
+use std::{
+    path::Path,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    thread,
+    time::Duration,
+};
 
 use ab_glyph::{FontVec, PxScale};
 use anyhow::{anyhow, Context, Result};
@@ -189,6 +197,8 @@ impl FfmpegEncoder {
             encoder.set_flags(ffmpeg::codec::flag::Flags::GLOBAL_HEADER);
         }
 
+        encoder.set_max_b_frames(0);
+
         let hw_setup = if let Some(hwc) = hw_codec {
             encoder.set_format(hwc.hw_pixel_rust());
             let setup = unsafe {
@@ -332,10 +342,12 @@ impl FfmpegEncoder {
             .context("获取输出流时基失败")?
             .time_base();
 
+        let mut drain_retries = 0u32;
         loop {
             let mut packet = ffmpeg::codec::packet::Packet::empty();
             match self.encoder.receive_packet(&mut packet) {
                 Ok(()) => {
+                    drain_retries = 0;
                     packet.set_stream(self.ost_index);
                     packet.set_position(-1);
                     packet.rescale_ts(self.encoder_time_base, ost_time_base);
@@ -344,7 +356,11 @@ impl FfmpegEncoder {
                         .context("写入最终编码包失败")?;
                 }
                 Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::util::error::EAGAIN => {
-                    break
+                    drain_retries += 1;
+                    if drain_retries >= 200 {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
                 }
                 Err(ffmpeg::Error::Eof) => break,
                 Err(e) => return Err(anyhow!("编码器最终收包错误: {e}")),
@@ -355,6 +371,34 @@ impl FfmpegEncoder {
 
         Ok(())
     }
+}
+
+fn compute_max_danmaku_deadline(
+    danmakus: &[Danmaku],
+    regular: &FontVec,
+    args: &Args,
+    video_width: u32,
+    frame_duration_secs: f64,
+) -> f64 {
+    let mut max_deadline = 0.0f64;
+    for dan in danmakus {
+        let deadline_secs = match dan.mode {
+            DanmakuMode::Scroll | DanmakuMode::Reverse => {
+                let scale = PxScale::from((dan.font_size as f32) * args.font_scale);
+                let (text_width, _) = text_size(scale, regular, &dan.text);
+                let travel_frames = (text_width + video_width).div_ceil(args.speed);
+                dan.time.as_secs_f64() + travel_frames as f64 * frame_duration_secs
+            }
+            DanmakuMode::Top | DanmakuMode::Bottom => {
+                dan.time.as_secs_f64() + args.fixed_duration
+            }
+            _ => dan.time.as_secs_f64(),
+        };
+        if deadline_secs > max_deadline {
+            max_deadline = deadline_secs;
+        }
+    }
+    max_deadline
 }
 
 pub(crate) fn video_process(
@@ -386,7 +430,25 @@ pub(crate) fn video_process(
         .expect("内置字体加载失败: SourceHanSansSC-Regular-2.otf，字体文件可能已损坏或不存在");
 
     let mut frame_count = 0u64;
-    let total_frames = decoder.frame_count();
+    let mut total_frames = decoder.frame_count();
+    let total_reporter = Arc::new(AtomicU64::new(0));
+
+    if args.longest {
+        let video_duration = if decoder.frame_rate() > 0.0 {
+            decoder.frame_count() as f64 / decoder.frame_rate() as f64
+        } else {
+            0.0
+        };
+        let max_deadline = compute_max_danmaku_deadline(
+            &danmakus, &regular, args, video_width, frame_duration_secs,
+        );
+        if max_deadline > video_duration {
+            decoder.set_extend_to(max_deadline, frame_duration_secs);
+            total_frames =
+                ((max_deadline + frame_duration_secs) / frame_duration_secs).ceil() as u64;
+        }
+    }
+    decoder.set_total_reporter(total_reporter.clone());
 
     thread::scope(move |s| -> Result<()> {
         let (recycle_s, recycle_r) = bounded::<RgbImage>(3);
@@ -399,17 +461,17 @@ pub(crate) fn video_process(
         let (decode_s, decode_r) = bounded(800);
         let decode_producer = s.spawn(move || -> Result<()> {
             loop {
-                let mut image = recycle_r
-                    .recv()
-                    .expect("帧回收通道异常关闭，编码线程可能已崩溃");
+                let Ok(mut image) = recycle_r.recv() else {
+                    break;
+                };
                 let ts_secs = match decoder.next_frame_into(&mut image)? {
                     Some(ts) => ts,
                     None => break,
                 };
                 let dur = Duration::from_secs_f64(ts_secs);
-                decode_s
-                    .send((ts_secs, dur, image))
-                    .expect("接收端不应提早关闭");
+                if decode_s.send((ts_secs, dur, image)).is_err() {
+                    break;
+                }
             }
             Ok(())
         });
@@ -541,12 +603,16 @@ pub(crate) fn video_process(
                 draw_fixed_danmukus(&mut draw_params, &mut top_slots, true);
                 draw_fixed_danmukus(&mut draw_params, &mut bottom_slots, false);
 
-                encode_s
-                    .send((image, ts_secs))
-                    .expect("接收端不得早于发送端关闭");
+                if encode_s.send((image, ts_secs)).is_err() {
+                    break;
+                }
                 frame_count += 1;
                 if !args.quiet {
-                    render_progress(frame_count, total_frames);
+                    render_progress(
+                        frame_count,
+                        total_frames,
+                        total_reporter.load(Ordering::Relaxed),
+                    );
                 }
             }
 
@@ -562,7 +628,7 @@ pub(crate) fn video_process(
                 encoder
                     .encode(&image, ts_secs)
                     .with_context(|| format!("编码帧失败 (时间戳: {ts_secs})"))?;
-                let _ = recycle_s.try_send(image);
+                let _ = recycle_s.send(image);
             }
 
             if !args.quiet {
@@ -576,19 +642,32 @@ pub(crate) fn video_process(
         });
 
         let handles = [decode_producer, process_pipeline, encode_customer];
+        let mut first_err: Option<anyhow::Error> = None;
         for handle in handles {
             match handle.join() {
-                Ok(res) => res?,
-                Err(e) => {
-                    if let Some(msg) = e.downcast_ref::<&'static str>() {
-                        panic!("{}", msg);
-                    } else if let Some(msg) = e.downcast_ref::<String>() {
-                        panic!("{}", msg);
-                    } else {
-                        panic!("panic with unknown payload");
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
                     }
                 }
+                Err(e) => {
+                    if first_err.is_some() {
+                        break;
+                    }
+                    first_err = Some(if let Some(msg) = e.downcast_ref::<&'static str>() {
+                        anyhow::anyhow!("线程 panic: {msg}")
+                    } else if let Some(msg) = e.downcast_ref::<String>() {
+                        anyhow::anyhow!("线程 panic: {msg}")
+                    } else {
+                        anyhow::anyhow!("线程 panic: 未知错误")
+                    });
+                }
             }
+        }
+
+        if let Some(err) = first_err {
+            return Err(err);
         }
 
         Ok(())
@@ -852,21 +931,35 @@ pub(crate) fn same_specifications(
     Ok((encoder, frame_duration_secs))
 }
 
-fn render_progress(current: u64, total: u64) {
+fn render_progress(current: u64, estimate: u64, exact_total: u64) {
     const BAR_WIDTH: usize = 30;
 
+    let total = if exact_total > 0 {
+        exact_total
+    } else {
+        estimate.max(current)
+    };
     if total == 0 {
         eprint!("\r正在渲染弹幕... 已处理 {current} 帧");
     } else {
         let pct = (current as f64 / total as f64 * 100.0) as u32;
         let filled = ((BAR_WIDTH as f64 * current as f64 / total as f64) as usize).min(BAR_WIDTH);
         let empty = BAR_WIDTH - filled;
-        eprint!(
-            "\r[{}{}] {:>3}% ({current}/{total})",
-            "█".repeat(filled),
-            "░".repeat(empty),
-            pct,
-        );
+        if exact_total > 0 && current >= exact_total {
+            eprintln!(
+                "\r[{}{}] {:>3}% ({current}/{total})",
+                "█".repeat(filled),
+                "░".repeat(empty),
+                pct,
+            );
+        } else {
+            eprint!(
+                "\r[{}{}] {:>3}% ({current}/{total})",
+                "█".repeat(filled),
+                "░".repeat(empty),
+                pct,
+            );
+        }
     }
 }
 

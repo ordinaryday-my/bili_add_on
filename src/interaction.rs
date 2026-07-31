@@ -61,6 +61,9 @@ pub struct Args {
         help = "视频编码器: auto/nvenc/amf/qsv/software（auto 自动选择最佳可用编码器）"
     )]
     pub encoder: String,
+
+    #[arg(long, help = "若弹幕时间跨度大于视频时长，自动延长输出视频（末尾补黑帧）以完整显示全部弹幕")]
+    pub longest: bool,
 }
 
 impl Args {
@@ -205,6 +208,7 @@ mod tests {
             no_audio: false,
             quiet: false,
             encoder: "auto".to_string(),
+            longest: false,
         }
     }
 
@@ -227,6 +231,7 @@ mod tests {
             no_audio: false,
             quiet: false,
             encoder: "auto".to_string(),
+            longest: false,
         };
 
         args.check_output().unwrap();
