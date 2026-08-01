@@ -3,8 +3,11 @@ use std::{borrow::Cow, fs, path::Path, time::Duration};
 use anyhow::{anyhow, Context};
 use image::Rgb;
 use quick_xml::{
-    XmlVersion, escape::unescape, events::{Event, attributes::Attribute},
+    escape::unescape,
+    events::{attributes::Attribute, Event},
+    XmlVersion,
 };
+use regex::Regex;
 
 use crate::{
     utils::{cow_u8_to_str, decode_bytes, decode_rgb},
@@ -346,49 +349,47 @@ pub fn get_danmuku_xml_from_file(file: &Path) -> anyhow::Result<String> {
     Ok(xml)
 }
 
+pub fn filter_danmakus(danmakus: Vec<Danmaku>, filters: &[Regex]) -> Vec<Danmaku> {
+    let after = danmakus
+        .into_iter()
+        .filter(|dan| {
+            !filters
+                .iter()
+                .any(|regex| regex.is_match(dan.text.as_str()))
+        })
+        .collect::<Vec<_>>();
+    after
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use std::time::Duration;
 
     #[test]
     fn test_danmaku_mode_from_id_scroll_1() {
-        assert!(matches!(
-            DanmakuMode::from_id(1),
-            Some(DanmakuMode::Scroll)
-        ));
+        assert!(matches!(DanmakuMode::from_id(1), Some(DanmakuMode::Scroll)));
     }
 
     #[test]
     fn test_danmaku_mode_from_id_scroll_2() {
-        assert!(matches!(
-            DanmakuMode::from_id(2),
-            Some(DanmakuMode::Scroll)
-        ));
+        assert!(matches!(DanmakuMode::from_id(2), Some(DanmakuMode::Scroll)));
     }
 
     #[test]
     fn test_danmaku_mode_from_id_scroll_3() {
-        assert!(matches!(
-            DanmakuMode::from_id(3),
-            Some(DanmakuMode::Scroll)
-        ));
+        assert!(matches!(DanmakuMode::from_id(3), Some(DanmakuMode::Scroll)));
     }
 
     #[test]
     fn test_danmaku_mode_from_id_bottom() {
-        assert!(matches!(
-            DanmakuMode::from_id(4),
-            Some(DanmakuMode::Bottom)
-        ));
+        assert!(matches!(DanmakuMode::from_id(4), Some(DanmakuMode::Bottom)));
     }
 
     #[test]
     fn test_danmaku_mode_from_id_top() {
-        assert!(matches!(
-            DanmakuMode::from_id(5),
-            Some(DanmakuMode::Top)
-        ));
+        assert!(matches!(DanmakuMode::from_id(5), Some(DanmakuMode::Top)));
     }
 
     #[test]
@@ -519,10 +520,7 @@ mod tests {
 
     #[test]
     fn test_danmaku_new_missing_fields() {
-        let result = Danmaku::new(
-            Cow::Borrowed("1.0"),
-            Cow::Borrowed("text".as_bytes()),
-        );
+        let result = Danmaku::new(Cow::Borrowed("1.0"), Cow::Borrowed("text".as_bytes()));
         assert!(result.is_err());
     }
 
@@ -574,5 +572,36 @@ mod tests {
         let danmakus = parse_danmakus(xml).unwrap();
         assert_eq!(danmakus.len(), 1);
         assert_eq!(danmakus[0].text, "Hello & World <3");
+    }
+
+    #[test]
+    fn test_filter_danmukus() {
+        let xml = r#"<i>
+    <chatserver>chat.bilibili.com</chatserver>
+    <chatid>40462519937</chatid>
+    <mission>0</mission>
+    <maxlimit>3000</maxlimit>
+    <state>0</state>
+    <real_name>0</real_name>
+    <source>k-v</source>
+    <d p="889.83300,1,25,15138834,1785544700,0,afdd41c2,2168065099406529280,10">prefixDWIHNDWDO</d>
+    <d p="255.93700,1,25,16777215,1785544559,0,f6b0f63a,2168063920018110720,10">fqneoifnoeinSsufix</d>
+    <d p="174.82900,5,25,16777215,1785550946,0,beac5367,2168117501178102016,10">1435415235</d>
+    <d p="2.30400,5,25,16777215,1785562832,0,66a2b0fe,2168217205597485056,10">????？？？</d>
+    <d p="2.30400,5,25,16777215,1785562832,0,66a2b0fe,2168217205597485056,10">Hello World</d>
+<i>"#;
+        let danmakus = parse_danmakus(xml.to_string());
+        assert!(danmakus.is_ok());
+        let danmakus = danmakus.unwrap();
+        let filters = ["^prefix", "sufix$", r"^\d+$", r"^[?？]+$"]
+            .into_iter()
+            .map(Regex::new)
+            .inspect(|res| assert!(res.is_ok()))
+            .map(|res| res.unwrap())
+            .collect::<Vec<_>>();
+
+        let after = filter_danmakus(danmakus, &filters);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].text.as_str(), "Hello World");
     }
 }

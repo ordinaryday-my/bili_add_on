@@ -1,15 +1,12 @@
 use std::{fs, process::exit, time::Instant};
 
-use anyhow::{Context, anyhow};
+use anyhow::{anyhow, Context};
 use clap::Parser;
 #[cfg(not(feature = "dhat-heap"))]
 use mimalloc::MiMalloc;
 
 use crate::{
-    core::{EncoderPref, same_specifications, video_process},
-    danmaku::{get_danmuku_xml_by_bili_id, get_danmuku_xml_from_file, parse_danmakus},
-    decoder::VideoDecoder,
-    interaction::Args,
+    core::{EncoderPref, same_specifications, video_process}, danmaku::{filter_danmakus, get_danmuku_xml_by_bili_id, get_danmuku_xml_from_file, parse_danmakus}, decoder::VideoDecoder, interaction::Args,
 };
 
 mod audio;
@@ -49,6 +46,11 @@ fn run() -> anyhow::Result<()> {
         .context("生成默认输出路径失败（源文件名无效，无法自动拼接输出文件名）")?;
     let args = args;
 
+    let filters = args
+        .parse_filters()
+        .transpose()
+        .context("--filter参数转换失败")?;
+
     let xml = if let Some(id) = &args.source.bvid {
         get_danmuku_xml_by_bili_id(id)
             .with_context(|| format!("获取B站弹幕数据失败 (bvid: {id})"))?
@@ -66,6 +68,15 @@ fn run() -> anyhow::Result<()> {
     if !args.quiet {
         eprintln!("已解析 {} 条弹幕", danmakus.len());
     }
+
+    let danmakus = if let Some(filters) = filters {
+        let original_len = danmakus.len();
+        let after = filter_danmakus(danmakus, &filters);
+        eprintln!("滤过 {} 个", original_len - after.len());
+        after
+    } else {
+        danmakus
+    };    
 
     ffmpeg_next::init()
         .map_err(|e| anyhow!("{e}"))

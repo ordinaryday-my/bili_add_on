@@ -1,6 +1,7 @@
 use std::{cmp::Ordering, ffi::OsString, path::PathBuf};
 use clap::Parser;
 use anyhow::{Context, anyhow, bail};
+use regex::Regex;
 
 #[derive(Debug, Parser)]
 #[command(version, author, about)]
@@ -64,6 +65,9 @@ pub struct Args {
 
     #[arg(long, help = "若弹幕时间跨度大于视频时长，自动延长输出视频（末尾补黑帧）以完整显示全部弹幕")]
     pub longest: bool,
+
+    #[arg(long, help = "弹幕过滤条件（regex）", value_delimiter = ',')]
+    pub filter: Option<Vec<String>>,
 }
 
 impl Args {
@@ -171,6 +175,18 @@ impl Args {
 
         Ok(())
     }
+
+    pub fn parse_filters(&self) -> Option<Result<Vec<Regex>, regex::Error>> {
+        let Some(filters) = &self.filter else {
+            return None;
+        };
+
+        let res: Result<Vec<_>, _> = filters.iter()
+            .map(|s| Regex::new(s.as_str()))
+            .collect();
+
+        Some(res)
+    }
 }
 
 #[derive(clap::Args, Debug)]
@@ -209,6 +225,7 @@ mod tests {
             quiet: false,
             encoder: "auto".to_string(),
             longest: false,
+            filter: Some(vec![]),
         }
     }
 
@@ -232,6 +249,7 @@ mod tests {
             quiet: false,
             encoder: "auto".to_string(),
             longest: false,
+            filter: Some(vec![])
         };
 
         args.check_output().unwrap();
