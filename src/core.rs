@@ -54,7 +54,7 @@ impl StageTimings {
             frames: 0,
         }
     }
-
+    #[allow(dead_code)]
     fn report(&self) {
         if self.frames == 0 {
             return;
@@ -389,7 +389,7 @@ impl FfmpegEncoder {
     }
 
     fn finish(&mut self) -> Result<()> {
-        self.timings.report();
+        // self.timings.report();
         self.encoder.send_eof().context("编码器发送 EOF 信号失败")?;
 
         let ost_time_base = self
@@ -737,6 +737,10 @@ pub(crate) fn video_process(
                 if !args.quiet && !final_shown {
                     let exact = total_reporter.load(Ordering::Relaxed);
                     render_progress(frame_count, total_frames, exact);
+                    if exact == 0 || frame_count < exact {
+                        // 异常路径：收尾行未带换行，补一个避免后续输出粘连
+                        eprintln!();
+                    }
                 }
 
                 Ok(())
@@ -756,10 +760,6 @@ pub(crate) fn video_process(
                         .encode(&image, ts_secs)
                         .with_context(|| format!("编码帧失败 (时间戳: {ts_secs})"))?;
                     let _ = recycle_s.send(image);
-                }
-
-                if !args.quiet {
-                    eprintln!(); // finalize progress bar line
                 }
 
                 encoder
