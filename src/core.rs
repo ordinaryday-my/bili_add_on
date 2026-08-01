@@ -2,15 +2,15 @@ use core::panic;
 use std::{
     path::Path,
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
     thread,
     time::{Duration, Instant},
 };
 
 use ab_glyph::{FontVec, PxScale};
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use bit_set::BitSet;
 use crossbeam_channel::bounded;
 use image::{RgbImage, Rgba, RgbaImage};
@@ -24,7 +24,7 @@ use crate::{
     decoder::VideoDecoder,
     hw,
     interaction::Args,
-    utils::{GrowableVec, Ignore, blit_cached_text, rail_hs, rgb24_to_yuv420_band_raw},
+    utils::{blit_cached_text, sprite_ink_bounds, GrowableVec, Ignore},
 };
 
 #[allow(dead_code)]
@@ -90,8 +90,9 @@ pub(crate) struct FfmpegEncoder {
     ost_index: usize,
     encoder_time_base: ffmpeg::Rational,
     frame_count: u64,
+    sw_scaler: ffmpeg::software::scaling::context::Context,
+    sw_frame_rgb: ffmpeg::frame::Video,
     sw_frame_yuv: ffmpeg::frame::Video,
-    yuv_scratch: Vec<u8>,
     hw_setup: Option<hw::HwSetup>,
     timings: StageTimings,
 }
@@ -163,13 +164,35 @@ impl FfmpegEncoder {
                     let ost_index = ost.index();
                     ost.set_parameters(&encoder);
 
-                    let sw_dst_pix = if hw_setup.is_some() {
-                        ffmpeg::util::format::Pixel::NV12
+                    let (sw_dst_pix, sw_dst_buffer) = if hw_setup.is_some() {
+                        (ffmpeg::util::format::Pixel::NV12, false)
                     } else {
-                        ffmpeg::util::format::Pixel::YUV420P
+                        (ffmpeg::util::format::Pixel::YUV420P, true)
                     };
 
-                    let sw_frame_yuv = ffmpeg::frame::Video::new(sw_dst_pix, width, height);
+                    let sw_scaler = ffmpeg::software::scaling::context::Context::get(
+                        ffmpeg::util::format::Pixel::RGB24,
+                        width,
+                        height,
+                        sw_dst_pix,
+                        width,
+                        height,
+                        ffmpeg::software::scaling::flag::Flags::empty(),
+                    )
+                    .context("创建像素格式转换器失败（RGB 转编码像素格式）")?;
+
+                    let sw_frame_rgb = ffmpeg::frame::Video::new(
+                        ffmpeg::util::format::Pixel::RGB24,
+                        width,
+                        height,
+                    );
+
+                    let mut sw_frame_yuv = ffmpeg::frame::Video::new(sw_dst_pix, width, height);
+                    if sw_dst_buffer {
+                        unsafe {
+                            ffmpeg::ffi::av_frame_get_buffer(sw_frame_yuv.as_mut_ptr(), 0);
+                        }
+                    }
 
                     octx.write_header().context("写入输出文件头失败")?;
 
@@ -179,8 +202,9 @@ impl FfmpegEncoder {
                         ost_index,
                         encoder_time_base,
                         frame_count: 0,
+                        sw_scaler,
+                        sw_frame_rgb,
                         sw_frame_yuv,
-                        yuv_scratch: vec![0u8; width as usize * height as usize * 3 / 2],
                         hw_setup,
                         timings: StageTimings::new(),
                     });
@@ -246,73 +270,32 @@ impl FfmpegEncoder {
 
     fn encode(&mut self, image: &RgbImage, timestamp_secs: f64) -> Result<()> {
         let (width, height) = image.dimensions();
-        let w = width as usize;
-        let h = height as usize;
         let raw = image.as_raw();
+
+        let t0 = Instant::now();
+        unsafe {
+            ffmpeg::ffi::av_image_fill_arrays(
+                (*self.sw_frame_rgb.as_mut_ptr()).data.as_mut_ptr(),
+                (*self.sw_frame_rgb.as_mut_ptr()).linesize.as_mut_ptr(),
+                raw.as_ptr(),
+                ffmpeg::util::format::Pixel::RGB24.into(),
+                width as i32,
+                height as i32,
+                1,
+            );
+        }
+        self.sw_frame_rgb.set_width(width);
+        self.sw_frame_rgb.set_height(height);
 
         let tb_num = self.encoder_time_base.numerator() as f64;
         let tb_den = self.encoder_time_base.denominator() as f64;
         let pts = (timestamp_secs * tb_den / tb_num).round() as i64;
+        self.sw_frame_rgb.set_pts(Some(pts));
 
-        let t0 = Instant::now();
-        unsafe {
-            rgb24_to_yuv420_band_raw(
-                raw.as_ptr(),
-                w,
-                h,
-                0,
-                h,
-                self.yuv_scratch.as_mut_ptr(),
-                self.hw_setup.is_some(),
-            );
-        }
+        self.sw_scaler
+            .run(&self.sw_frame_rgb, &mut self.sw_frame_yuv)
+            .context("帧像素格式缩放失败")?;
         let t1 = Instant::now();
-
-        unsafe {
-            let yuv = self.sw_frame_yuv.as_mut_ptr();
-            let scratch = self.yuv_scratch.as_ptr();
-            let y_linesize = (*yuv).linesize[0] as usize;
-            let row_bytes = w;
-            for y in 0..h {
-                std::ptr::copy_nonoverlapping(
-                    scratch.add(y * row_bytes),
-                    (*yuv).data[0].add(y * y_linesize),
-                    row_bytes,
-                );
-            }
-            let w2 = w / 2;
-            let h2 = h / 2;
-            let y_size = w * h;
-            if self.hw_setup.is_some() {
-                let uv_linesize = (*yuv).linesize[1] as usize;
-                let uv_bytes = w;
-                for by in 0..h2 {
-                    std::ptr::copy_nonoverlapping(
-                        scratch.add(y_size + by * uv_bytes),
-                        (*yuv).data[1].add(by * uv_linesize),
-                        uv_bytes,
-                    );
-                }
-            } else {
-                let uv_linesize = (*yuv).linesize[1] as usize;
-                let uv_row = w2;
-                let uv_size = w2 * h2;
-                for by in 0..h2 {
-                    std::ptr::copy_nonoverlapping(
-                        scratch.add(y_size + by * uv_row),
-                        (*yuv).data[1].add(by * uv_linesize),
-                        uv_row,
-                    );
-                    std::ptr::copy_nonoverlapping(
-                        scratch.add(y_size + uv_size + by * uv_row),
-                        (*yuv).data[2].add(by * uv_linesize),
-                        uv_row,
-                    );
-                }
-            }
-        }
-        self.sw_frame_yuv.set_width(width);
-        self.sw_frame_yuv.set_height(height);
 
         let mut upload_done = t1;
         let send_result = if let Some(ref hw_setup) = self.hw_setup {
@@ -484,14 +467,9 @@ pub(crate) fn video_process(
     danmakus.sort_unstable_by_key(|dan| std::cmp::Reverse(dan.time));
 
     let (video_width, video_height) = decoder.size();
-    let gap = args.line_spacing;
     let area_top = (video_height as f64 * args.top_ratio) as u32;
     let area_bottom = (video_height as f64 * args.bottom_ratio) as u32;
     let area_height = area_bottom - area_top;
-
-    let base_font_size = args.font_scale * 25.0;
-    let line_height = base_font_size as u32 + gap;
-    let rail_cnt = area_height / line_height;
 
     let mut scroll_slots: GrowableVec<Option<(Danmaku, NormalComponent)>> = GrowableVec::new(None);
     let mut top_slots: GrowableVec<Option<(Danmaku, NormalComponent)>> = GrowableVec::new(None);
@@ -501,6 +479,27 @@ pub(crate) fn video_process(
     static SOURCE_FONT: &[u8] = include_bytes!("../fonts/SourceHanSansSC-Regular-2.otf");
     let regular = FontVec::try_from_vec(SOURCE_FONT.to_vec())
         .expect("内置字体加载失败: SourceHanSansSC-Regular-2.otf，字体文件可能已损坏或不存在");
+
+    // 标准字号（25 × font_scale）参考墨迹高度：轨道基准间距 = 墨迹高度 + line_spacing，
+    // 保证标准字号弹幕的相邻行视觉间隙恰为 line_spacing（轨道间无死区）。
+    let std_scale = PxScale::from(25.0 * args.font_scale);
+    let (sample_w, sample_h) = text_size(std_scale, &regular, "字");
+    let mut sample_img = RgbaImage::new(sample_w, sample_h);
+    draw_text_mut(
+        &mut sample_img,
+        Rgba([255, 255, 255, 255]),
+        0,
+        0,
+        std_scale,
+        &regular,
+        "字",
+    );
+    let ink_ref = sprite_ink_bounds(&sample_img)
+        .map(|(t, b)| b.saturating_sub(t))
+        .unwrap_or(1)
+        .max(1);
+    let base_pitch = ink_ref.saturating_add(args.line_spacing).max(1);
+    let rail_cnt = area_height / base_pitch;
 
     let mut frame_count = 0u64;
     let mut total_frames = decoder.frame_count();
@@ -560,7 +559,8 @@ pub(crate) fn video_process(
         let process_pipeline = thread::Builder::new()
             .name("render".to_string())
             .spawn_scoped(s, move || -> Result<()> {
-                let mut last_progress = Instant::now() - Duration::from_millis(PROGRESS_INTERVAL_MS);
+                let mut last_progress =
+                    Instant::now() - Duration::from_millis(PROGRESS_INTERVAL_MS);
                 loop {
                     let Ok((ts_secs, dur, mut image)) = decode_r.recv() else {
                         break;
@@ -582,6 +582,8 @@ pub(crate) fn video_process(
                             &regular,
                             &d.text,
                         );
+                        // 虚拟轨道数：该字号墨迹高度需要几个基础轨道（B站虚拟轨道机制）
+                        let n_rails = compute_n_rails(ink_ref, base_pitch, d.font_size);
                         let dead_line = match d.mode {
                             DanmakuMode::Scroll | DanmakuMode::Reverse => {
                                 let travel_frames = (width + video_width).div_ceil(args.speed);
@@ -602,7 +604,7 @@ pub(crate) fn video_process(
                                         x: video_width as i64,
                                         y: None,
                                         width,
-                                        height,
+                                        n_rails,
                                         dead_line,
                                         cached_text: Some(cached_text),
                                     },
@@ -615,7 +617,7 @@ pub(crate) fn video_process(
                                         x: video_width as i64 / 2 - width as i64 / 2,
                                         y: None,
                                         width,
-                                        height,
+                                        n_rails,
                                         dead_line,
                                         cached_text: Some(cached_text),
                                     },
@@ -628,7 +630,7 @@ pub(crate) fn video_process(
                                         x: video_width as i64 / 2 - width as i64 / 2,
                                         y: None,
                                         width,
-                                        height,
+                                        n_rails,
                                         dead_line,
                                         cached_text: Some(cached_text),
                                     },
@@ -641,7 +643,7 @@ pub(crate) fn video_process(
                                         x: -(width as i64),
                                         y: None,
                                         width,
-                                        height,
+                                        n_rails,
                                         dead_line,
                                         cached_text: Some(cached_text),
                                     },
@@ -658,10 +660,11 @@ pub(crate) fn video_process(
 
                     let mut draw_params = DrawParams {
                         image: &mut image,
-                        line_height,
+                        base_pitch,
                         rail_cnt,
                         area_top: area_top as i64,
                         opacity: args.opacity,
+                        min_space: args.min_space as i64,
                     };
 
                     draw_scroll_danmukus(&mut draw_params, &mut scroll_slots, ToLeft);
@@ -683,8 +686,8 @@ pub(crate) fn video_process(
                         args.speed,
                     );
 
-                    draw_fixed_danmukus(&mut draw_params, &mut top_slots, true);
-                    draw_fixed_danmukus(&mut draw_params, &mut bottom_slots, false);
+                    draw_fixed_danmukus(&mut draw_params, &mut top_slots, false);
+                    draw_fixed_danmukus(&mut draw_params, &mut bottom_slots, true);
 
                     if encode_s.send((image, ts_secs)).is_err() {
                         break;
@@ -694,7 +697,9 @@ pub(crate) fn video_process(
                         let exact = total_reporter.load(Ordering::Relaxed);
                         let is_final = exact > 0 && frame_count >= exact;
                         let now = Instant::now();
-                        if is_final || now - last_progress >= Duration::from_millis(PROGRESS_INTERVAL_MS) {
+                        if is_final
+                            || now - last_progress >= Duration::from_millis(PROGRESS_INTERVAL_MS)
+                        {
                             render_progress(frame_count, total_frames, exact);
                             last_progress = now;
                         }
@@ -758,19 +763,67 @@ pub(crate) fn video_process(
 
 struct DrawParams<'a> {
     image: &'a mut RgbImage,
-    line_height: u32,
+    base_pitch: u32,
     rail_cnt: u32,
     area_top: i64,
     opacity: f64,
+    min_space: i64,
+}
+
+const RAIL_OFFSET: usize = 1000;
+
+/// 在轨道占用位图中查找第一条空闲的虚拟轨道（连续 `n_rails` 条基础轨道）。
+///
+/// `from_bottom == true` 时从底部向上扫描（底部固定弹幕），否则自上而下。
+/// 返回基础轨道序号，找不到返回 `None`。
+fn find_free_track(
+    occupieds: &BitSet,
+    n_rails: u32,
+    rail_cnt: u32,
+    from_bottom: bool,
+) -> Option<u32> {
+    let last_start = rail_cnt.saturating_sub(n_rails);
+    let mut i = if from_bottom { last_start } else { 0 };
+    loop {
+        let free = (0..n_rails).all(|k| !occupieds.contains(RAIL_OFFSET + (i + k) as usize));
+        if free {
+            return Some(i);
+        }
+        if from_bottom {
+            if i == 0 {
+                break;
+            }
+            i -= 1;
+        } else {
+            if i >= last_start {
+                break;
+            }
+            i += 1;
+        }
+    }
+    None
+}
+
+/// 计算某字号的虚拟轨道数：该字号墨迹高度需要几个基础轨道（B站虚拟轨道机制）。
+///
+/// `ink_ref` 为标准字号（25）在 `font_scale` 下的墨迹高度；其余字号按比例缩放。
+fn compute_n_rails(ink_ref: u32, base_pitch: u32, font_size: usize) -> u32 {
+    let ink_h_font = (ink_ref as u64 * font_size as u64).div_ceil(25) as u32;
+    ((ink_h_font + base_pitch - 1) / base_pitch).max(1)
+}
+
+fn mark_track_occupied(occupieds: &mut BitSet, track: u32, n_rails: u32) {
+    for k in 0..n_rails {
+        occupieds.insert(RAIL_OFFSET + (track + k) as usize);
+    }
 }
 
 fn draw_fixed_danmukus(
     params: &mut DrawParams,
     fixed_slots: &mut GrowableVec<Option<(Danmaku, NormalComponent)>>,
-    to_bottom: bool,
+    from_bottom: bool,
 ) {
-    const OFFSET: i64 = 1000;
-    let cap = fixed_slots.len() + OFFSET as usize;
+    let cap = fixed_slots.len() + RAIL_OFFSET;
     let mut occupieds = BitSet::with_capacity(cap);
     let mut ensure_y_q = Vec::new();
     let mut pending_y: Vec<(i64, u32)> = Vec::new();
@@ -794,45 +847,30 @@ fn draw_fixed_danmukus(
         let raw_occupieds = fixed_slots.iter().filter_map(|opt| {
             opt.as_ref().map(|(_, c)| c).and_then(|comp| {
                 if comp.y.is_some() {
-                    Some((comp.height, comp.y.unwrap()))
+                    Some((comp.y.unwrap(), comp.n_rails))
                 } else {
                     None
                 }
             })
         });
 
-        for (height, y) in raw_occupieds {
-            occupieds.insert((y + OFFSET) as usize);
-            let extra_rails = height.div_ceil(params.line_height);
-            for i in 1..extra_rails {
-                occupieds.insert(((y + i as i64 * params.line_height as i64) + OFFSET) as usize);
-            }
+        for (y, n_rails) in raw_occupieds {
+            debug_assert_eq!(y % params.base_pitch as i64, 0);
+            let track = (y / params.base_pitch as i64) as u32;
+            mark_track_occupied(&mut occupieds, track, n_rails);
         }
 
-        for &(y, height) in &pending_y {
-            occupieds.insert((y + OFFSET) as usize);
-            let extra_rails = height.div_ceil(params.line_height);
-            for i in 1..extra_rails {
-                occupieds.insert(((y + i as i64 * params.line_height as i64) + OFFSET) as usize);
-            }
+        for &(y, n_rails) in &pending_y {
+            let track = (y / params.base_pitch as i64) as u32;
+            mark_track_occupied(&mut occupieds, track, n_rails);
         }
 
-        let rail_hs = rail_hs(params.line_height, params.rail_cnt);
-        let free = rail_hs.filter(|h| !occupieds.contains((h + OFFSET) as usize));
-        let mut free: Box<dyn Iterator<Item = _>> = if to_bottom {
-            Box::new(free)
-        } else {
-            Box::new(free.collect::<Vec<_>>().into_iter().rev())
+        let Some(track) = find_free_track(&occupieds, comp.n_rails, params.rail_cnt, from_bottom)
+        else {
+            occupieds.reset();
+            continue;
         };
-
-        let y = match free.next() {
-            None => {
-                drop(free);
-                occupieds.reset();
-                continue;
-            }
-            Some(y) => y,
-        };
+        let y = track as i64 * params.base_pitch as i64;
 
         blit_cached_text(
             params.image,
@@ -841,9 +879,8 @@ fn draw_fixed_danmukus(
             (y + params.area_top) as i32,
             params.opacity,
         );
-        pending_y.push((y, comp.height));
+        pending_y.push((y, comp.n_rails));
         ensure_y_q.push((idx, y));
-        drop(free);
         occupieds.reset();
     }
 
@@ -888,8 +925,7 @@ fn draw_scroll_danmukus(
     scroll_slots: &mut GrowableVec<Option<(Danmaku, NormalComponent)>>,
     dir: Direction,
 ) {
-    const OFFSET: i64 = 1000;
-    let cap = scroll_slots.len() + OFFSET as usize;
+    let cap = scroll_slots.len() + RAIL_OFFSET;
     let mut occupieds = BitSet::with_capacity(cap);
     let mut ensure_y_q = Vec::new();
     let mut pending_y: Vec<(i64, u32)> = Vec::new();
@@ -913,56 +949,36 @@ fn draw_scroll_danmukus(
         let raw_occupieds = scroll_slots.iter().filter_map(|opt| {
             opt.as_ref().map(|(_, c)| c).and_then(|comp| {
                 if comp.y.is_some() {
-                    Some((comp.width, comp.height, comp.x, comp.y.unwrap()))
+                    Some((comp.width, comp.x, comp.y.unwrap(), comp.n_rails))
                 } else {
                     None
                 }
             })
         });
 
-        for (width, height, x, y) in raw_occupieds {
-            debug_assert_eq!(y % params.line_height as i64, 0);
-            match dir {
-                ToLeft => {
-                    if width as i64 + x > comp.x {
-                        occupieds.insert((y + OFFSET) as usize);
-                    } else {
-                        continue;
-                    }
-                }
-                ToRight => {
-                    if x < comp.x + comp.width as i64 {
-                        occupieds.insert((y + OFFSET) as usize);
-                    } else {
-                        continue;
-                    }
-                }
-            }
-            let extra_rails = height.div_ceil(params.line_height);
-            for i in 1..extra_rails {
-                occupieds.insert(((y + i as i64 * params.line_height as i64) + OFFSET) as usize);
-            }
-        }
-
-        for &(y, height) in &pending_y {
-            occupieds.insert((y + OFFSET) as usize);
-            let extra_rails = height.div_ceil(params.line_height);
-            for i in 1..extra_rails {
-                occupieds.insert(((y + i as i64 * params.line_height as i64) + OFFSET) as usize);
-            }
-        }
-
-        let rail_hs = rail_hs(params.line_height, params.rail_cnt);
-        let mut free = rail_hs.filter(|h| !occupieds.contains((h + OFFSET) as usize));
-
-        let y = match free.next() {
-            None => {
-                drop(free);
-                occupieds.reset();
+        for (width, x, y, n_rails) in raw_occupieds {
+            debug_assert_eq!(y % params.base_pitch as i64, 0);
+            let overlap = match dir {
+                ToLeft => width as i64 + x + params.min_space > comp.x,
+                ToRight => x < comp.x + comp.width as i64 + params.min_space,
+            };
+            if !overlap {
                 continue;
             }
-            Some(y) => y,
+            let track = (y / params.base_pitch as i64) as u32;
+            mark_track_occupied(&mut occupieds, track, n_rails);
+        }
+
+        for &(y, n_rails) in &pending_y {
+            let track = (y / params.base_pitch as i64) as u32;
+            mark_track_occupied(&mut occupieds, track, n_rails);
+        }
+
+        let Some(track) = find_free_track(&occupieds, comp.n_rails, params.rail_cnt, false) else {
+            occupieds.reset();
+            continue;
         };
+        let y = track as i64 * params.base_pitch as i64;
 
         blit_cached_text(
             params.image,
@@ -971,9 +987,8 @@ fn draw_scroll_danmukus(
             (y + params.area_top) as i32,
             params.opacity,
         );
-        pending_y.push((y, comp.height));
+        pending_y.push((y, comp.n_rails));
         ensure_y_q.push((idx, y));
-        drop(free);
         occupieds.reset();
     }
 
@@ -987,7 +1002,7 @@ struct NormalComponent {
     x: i64,
     y: Option<i64>,
     width: u32,
-    height: u32,
+    n_rails: u32,
     dead_line: Duration,
     cached_text: Option<RgbaImage>,
 }
@@ -1046,31 +1061,50 @@ fn render_progress(current: u64, estimate: u64, exact_total: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::{blit_cached_text, rail_hs};
+    use crate::utils::blit_cached_text;
     use image::{Rgb, RgbImage, RgbaImage};
 
     #[test]
-    fn test_rail_hs_basic() {
-        let positions: Vec<i64> = rail_hs(30, 3).collect();
-        assert_eq!(positions, vec![0, 30, 60]);
+    fn test_find_free_track_basic() {
+        let mut occ = BitSet::new();
+        mark_track_occupied(&mut occ, 1, 2);
+        assert_eq!(find_free_track(&occ, 1, 10, false), Some(0));
+        assert_eq!(find_free_track(&occ, 2, 10, false), Some(3));
+        assert_eq!(find_free_track(&occ, 3, 10, false), Some(3));
     }
 
     #[test]
-    fn test_rail_hs_single() {
-        let positions: Vec<i64> = rail_hs(10, 1).collect();
-        assert_eq!(positions, vec![0]);
+    fn test_find_free_track_from_bottom() {
+        let mut occ = BitSet::new();
+        mark_track_occupied(&mut occ, 7, 1);
+        assert_eq!(find_free_track(&occ, 1, 10, true), Some(9));
+        assert_eq!(find_free_track(&occ, 3, 10, true), Some(4));
     }
 
     #[test]
-    fn test_rail_hs_zero_rails() {
-        let positions: Vec<i64> = rail_hs(10, 0).collect();
-        assert_eq!(positions, vec![0]);
+    fn test_find_free_track_none() {
+        let mut occ = BitSet::new();
+        for t in 0..10 {
+            mark_track_occupied(&mut occ, t, 1);
+        }
+        assert_eq!(find_free_track(&occ, 1, 10, false), None);
+        assert_eq!(find_free_track(&occ, 1, 10, true), None);
     }
 
     #[test]
-    fn test_rail_hs_large() {
-        let positions: Vec<i64> = rail_hs(5, 4).collect();
-        assert_eq!(positions, vec![0, 5, 10, 15]);
+    fn test_compute_n_rails_bilibili_table() {
+        // ink_ref=32（scale 2 实测）、base_pitch=36：18→1, 25→1, 36→2, 45→2, 64→3
+        let n = |s: usize| compute_n_rails(32, 36, s);
+        assert_eq!(n(18), 1);
+        assert_eq!(n(25), 1);
+        assert_eq!(n(36), 2);
+        assert_eq!(n(45), 2);
+        assert_eq!(n(64), 3);
+    }
+
+    #[test]
+    fn test_compute_n_rails_min_one() {
+        assert_eq!(compute_n_rails(32, 36, 1), 1);
     }
 
     #[test]
@@ -1184,7 +1218,7 @@ mod tests {
             x: 100,
             y: Some(0),
             width: 10,
-            height: 10,
+            n_rails: 1,
             dead_line: Duration::ZERO,
             cached_text: None,
         };
@@ -1198,7 +1232,7 @@ mod tests {
             x: 100,
             y: Some(0),
             width: 10,
-            height: 10,
+            n_rails: 1,
             dead_line: Duration::ZERO,
             cached_text: None,
         };
@@ -1212,7 +1246,7 @@ mod tests {
             x: 100,
             y: Some(10),
             width: 10,
-            height: 10,
+            n_rails: 1,
             dead_line: Duration::ZERO,
             cached_text: None,
         };
@@ -1220,7 +1254,7 @@ mod tests {
             x: 200,
             y: None,
             width: 10,
-            height: 10,
+            n_rails: 1,
             dead_line: Duration::ZERO,
             cached_text: None,
         };
@@ -1246,7 +1280,7 @@ mod tests {
             x: 0,
             y: None,
             width: 10,
-            height: 10,
+            n_rails: 1,
             dead_line: Duration::from_secs(10),
             cached_text: None,
         };
@@ -1271,7 +1305,7 @@ mod tests {
             x: 0,
             y: None,
             width: 10,
-            height: 10,
+            n_rails: 1,
             dead_line: Duration::from_secs(10),
             cached_text: None,
         };
@@ -1296,7 +1330,7 @@ mod tests {
             x: 0,
             y: None,
             width: 10,
-            height: 10,
+            n_rails: 1,
             dead_line: Duration::from_secs(10),
             cached_text: None,
         };

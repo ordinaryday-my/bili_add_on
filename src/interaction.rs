@@ -1,7 +1,7 @@
-use std::{cmp::Ordering, ffi::OsString, path::PathBuf};
+use anyhow::{anyhow, bail, Context};
 use clap::Parser;
-use anyhow::{Context, anyhow, bail};
 use regex::Regex;
+use std::{cmp::Ordering, ffi::OsString, path::PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(version, author, about)]
@@ -47,13 +47,25 @@ pub struct Args {
     #[arg(long, default_value_t = 4, help = "弹幕行间距（像素）")]
     pub line_spacing: u32,
 
+    #[arg(
+        long,
+        default_value_t = 20,
+        help = "同一轨道内前后滚动弹幕的最小水平间距（像素），与字号无关"
+    )]
+    pub min_space: u32,
+
     #[arg(long, default_value_t = 5.0, help = "固定弹幕的持续时间（秒）")]
     pub fixed_duration: f64,
 
     #[arg(long, default_value_t = false, help = "不保留输入视频的音频轨道")]
     pub no_audio: bool,
 
-    #[arg(long, short, default_value_t = false, help = "静默模式，不输出进度提示")]
+    #[arg(
+        long,
+        short,
+        default_value_t = false,
+        help = "静默模式，不输出进度提示"
+    )]
     pub quiet: bool,
 
     #[arg(
@@ -63,7 +75,10 @@ pub struct Args {
     )]
     pub encoder: String,
 
-    #[arg(long, help = "若弹幕时间跨度大于视频时长，自动延长输出视频（末尾补黑帧）以完整显示全部弹幕")]
+    #[arg(
+        long,
+        help = "若弹幕时间跨度大于视频时长，自动延长输出视频（末尾补黑帧）以完整显示全部弹幕"
+    )]
     pub longest: bool,
 
     #[arg(long, help = "弹幕过滤条件（regex）", value_delimiter = ',')]
@@ -100,10 +115,7 @@ impl Args {
         }
 
         if !(0.0..=1.0).contains(&self.opacity) {
-            bail!(
-                "opacity 必须在 0.0 到 1.0 之间，当前值: {}",
-                self.opacity
-            );
+            bail!("opacity 必须在 0.0 到 1.0 之间，当前值: {}", self.opacity);
         }
 
         if self
@@ -143,10 +155,7 @@ impl Args {
         }
 
         if self.fixed_duration <= 0.0 {
-            bail!(
-                "fixed_duration 必须大于 0，当前值: {}",
-                self.fixed_duration
-            );
+            bail!("fixed_duration 必须大于 0，当前值: {}", self.fixed_duration);
         }
 
         if self.font_scale as f64 * 25.0 + self.line_spacing as f64 <= 0.0 {
@@ -181,9 +190,7 @@ impl Args {
             return None;
         };
 
-        let res: Result<Vec<_>, _> = filters.iter()
-            .map(|s| Regex::new(s.as_str()))
-            .collect();
+        let res: Result<Vec<_>, _> = filters.iter().map(|s| Regex::new(s.as_str())).collect();
 
         Some(res)
     }
@@ -192,10 +199,7 @@ impl Args {
 #[derive(clap::Args, Debug)]
 #[group(required = true, multiple = false)]
 pub struct DanmakuSource {
-    #[arg(
-        long,
-        help = "B站视频 ID（如 BV1fRNH6kEra），将自动拉取对应弹幕"
-    )]
+    #[arg(long, help = "B站视频 ID（如 BV1fRNH6kEra），将自动拉取对应弹幕")]
     pub bvid: Option<String>,
 
     #[arg(long, short, help = "本地弹幕 XML 文件路径")]
@@ -220,6 +224,7 @@ mod tests {
             font_scale: 1.0,
             speed: 3,
             line_spacing: 4,
+            min_space: 20,
             fixed_duration: 5.0,
             no_audio: false,
             quiet: false,
@@ -244,12 +249,13 @@ mod tests {
             font_scale: 1.0,
             speed: 3,
             line_spacing: 4,
+            min_space: 20,
             fixed_duration: 5.0,
             no_audio: false,
             quiet: false,
             encoder: "auto".to_string(),
             longest: false,
-            filter: Some(vec![])
+            filter: Some(vec![]),
         };
 
         args.check_output().unwrap();
@@ -330,21 +336,15 @@ mod tests {
     #[test]
     fn test_clap_parse_basic() {
         use clap::Parser;
-        let args = Args::try_parse_from([
-            "bili_add_on",
-            "--input", "video.mp4",
-            "--bvid", "BV1test",
-        ]);
+        let args =
+            Args::try_parse_from(["bili_add_on", "--input", "video.mp4", "--bvid", "BV1test"]);
         assert!(args.is_ok());
     }
 
     #[test]
     fn test_clap_parse_requires_source() {
         use clap::Parser;
-        let args = Args::try_parse_from([
-            "bili_add_on",
-            "--input", "video.mp4",
-        ]);
+        let args = Args::try_parse_from(["bili_add_on", "--input", "video.mp4"]);
         assert!(args.is_err());
     }
 }

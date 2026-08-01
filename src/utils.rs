@@ -7,109 +7,6 @@ use image::{Rgb, RgbImage, RgbaImage};
 
 pub type IntoIter<T> = std::vec::IntoIter<T>;
 
-/// 将 RGB24 的 `[y0, y1)` 行带转换为 4:2:0 YUV（BT.601 limited range）。
-///
-/// `dst` 为连续输出缓冲，大小为 `width * height * 3 / 2`：
-/// - `semi_planar == true`（NV12）: Y 平面 + 交错 U/V 平面
-/// - `semi_planar == false`（YUV420P）: Y 平面 + U 平面 + V 平面
-///
-/// `y0` 必须为偶数；`y1` 可为奇数（最后一行）。仅处理 2x2 块的色度，
-/// 奇数边缘行的 Y 按像素计算，色度取其上一行配对。
-///
-/// # Safety
-/// 调用方必须保证 `src`/`dst` 指向的缓冲大小与 `width * height` 匹配，
-/// 且各并行线程写入 `dst` 的 `[y0, y1)` 行带区域互不重叠。
-pub unsafe fn rgb24_to_yuv420_band_raw(
-    src: *const u8,
-    width: usize,
-    height: usize,
-    y0: usize,
-    y1: usize,
-    dst: *mut u8,
-    semi_planar: bool,
-) {
-    unsafe { rgb24_to_yuv420_band_scalar(src, width, height, y0, y1, dst, semi_planar) };
-}
-
-unsafe fn rgb24_to_yuv420_band_scalar(
-    src: *const u8,
-    width: usize,
-    height: usize,
-    y0: usize,
-    y1: usize,
-    dst: *mut u8,
-    semi_planar: bool,
-) {
-    let y_size = width * height;
-    let w2 = width / 2;
-    debug_assert!(y0 % 2 == 0 && y1 <= height && y0 < y1);
-
-    unsafe {
-        for y in y0..y1 {
-            let row = src.add(y * width * 3);
-            let drow = dst.add(y * width);
-            for x in 0..width {
-                let p = row.add(x * 3);
-                let r = *p as i32;
-                let g = *p.add(1) as i32;
-                let b = *p.add(2) as i32;
-                let yv = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-                *drow.add(x) = yv.clamp(16, 235) as u8;
-            }
-        }
-
-        for by in (y0 / 2)..y1.div_ceil(2) {
-            let r0 = by * 2;
-            let r1 = (by * 2 + 1).min(height - 1);
-            for bx in 0..w2 {
-                let mut su = 0i32;
-                let mut sv = 0i32;
-                for &r in &[r0, r1] {
-                    for dx in 0..2 {
-                        let p = src.add((r * width + (bx * 2 + dx)) * 3);
-                        let rr = *p as i32;
-                        let g = *p.add(1) as i32;
-                        let b = *p.add(2) as i32;
-                        su += -38 * rr - 74 * g + 112 * b + 128;
-                        sv += 112 * rr - 94 * g - 18 * b + 128;
-                    }
-                }
-                let idx = by * w2 + bx;
-                let u = ((su >> 10) + 128).clamp(16, 240) as u8;
-                let v = ((sv >> 10) + 128).clamp(16, 240) as u8;
-                if semi_planar {
-                    let base = y_size + idx * 2;
-                    *dst.add(base) = u;
-                    *dst.add(base + 1) = v;
-                } else {
-                    *dst.add(y_size + idx) = u;
-                    *dst.add(y_size + w2 * height.div_ceil(2) + idx) = v;
-                }
-            }
-        }
-    }
-}
-
-/// 将 RGB24 转换为 4:2:0 YUV（BT.601 limited range）。
-#[allow(dead_code)]
-pub fn rgb24_to_yuv420(src: &[u8], width: usize, height: usize, dst: &mut [u8], semi_planar: bool) {
-    let y_size = width * height;
-    let w2 = width / 2;
-    assert!(src.len() >= y_size * 3);
-    assert!(dst.len() >= y_size + w2 * (height.div_ceil(2)) * 2);
-    unsafe {
-        rgb24_to_yuv420_band_raw(
-            src.as_ptr(),
-            width,
-            height,
-            0,
-            height,
-            dst.as_mut_ptr(),
-            semi_planar,
-        );
-    }
-}
-
 pub struct GrowableVec<T> {
     inner: Vec<T>,
     initor: T,
@@ -256,15 +153,38 @@ impl<T> Ignore for T {
     }
 }
 
-pub fn rail_hs(line_height: u32, rail_cnt: u32) -> impl Iterator<Item = i64> {
-    std::iter::successors(Some(0i64), move |prev| {
-        let next = prev + line_height as i64;
-        if next < (rail_cnt * line_height) as i64 {
-            Some(next)
-        } else {
-            None
+/// 返回精灵图像中非透明像素的垂直包围盒 `(top, bottom)`（行号，含两端）。
+///
+/// 全透明时返回 `None`。
+pub fn sprite_ink_bounds(sprite: &RgbaImage) -> Option<(u32, u32)> {
+    let (w, h) = sprite.dimensions();
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let raw = sprite.as_raw();
+    let row_has_ink = |yy: u32| -> bool {
+        let start = yy as usize * w as usize * 4;
+        let end = start + w as usize * 4;
+        raw[start..end].chunks_exact(4).any(|px| px[3] > 0)
+    };
+    let mut top = None;
+    let mut bottom = None;
+    for yy in 0..h {
+        if row_has_ink(yy) {
+            top = Some(yy);
+            break;
         }
-    })
+    }
+    for yy in (0..h).rev() {
+        if row_has_ink(yy) {
+            bottom = Some(yy);
+            break;
+        }
+    }
+    match (top, bottom) {
+        (Some(t), Some(b)) => Some((t, b)),
+        _ => None,
+    }
 }
 
 pub fn blit_cached_text(frame: &mut RgbImage, sprite: &RgbaImage, x: i32, y: i32, opacity: f64) {
@@ -459,73 +379,19 @@ mod tests {
     }
 
     #[test]
-    fn test_rgb24_to_yuv420_black() {
-        let w = 4;
-        let h = 4;
-        let src = vec![0u8; w * h * 3];
-        let mut dst = vec![0u8; w * h * 3 / 2];
-        rgb24_to_yuv420(&src, w, h, &mut dst, true);
-        assert_eq!(dst[0], 16);
-        assert_eq!(dst[w * h], 128);
-        assert_eq!(dst[w * h + 1], 128);
+    fn test_sprite_ink_bounds_basic() {
+        let mut sprite = RgbaImage::new(4, 8);
+        sprite.put_pixel(0, 2, image::Rgba([255, 0, 0, 255]));
+        sprite.put_pixel(3, 5, image::Rgba([0, 255, 0, 128]));
+        let (top, bottom) = sprite_ink_bounds(&sprite).unwrap();
+        assert_eq!((top, bottom), (2, 5));
     }
 
     #[test]
-    fn test_rgb24_to_yuv420_white() {
-        let w = 4;
-        let h = 4;
-        let src = vec![255u8; w * h * 3];
-        let mut dst = vec![0u8; w * h * 3 / 2];
-        rgb24_to_yuv420(&src, w, h, &mut dst, true);
-        assert_eq!(dst[0], 235);
-        assert_eq!(dst[w * h], 128);
-        assert_eq!(dst[w * h + 1], 128);
-    }
-
-    #[test]
-    fn test_rgb24_to_yuv420_red() {
-        let w = 4;
-        let h = 4;
-        let mut src = vec![0u8; w * h * 3];
-        for px in src.chunks_mut(3) {
-            px[0] = 255;
-        }
-        let mut dst = vec![0u8; w * h * 3 / 2];
-        rgb24_to_yuv420(&src, w, h, &mut dst, true);
-        assert_eq!(dst[0], 82);
-        assert_eq!(dst[w * h], 90);
-        assert_eq!(dst[w * h + 1], 240);
-    }
-
-    #[test]
-    fn test_rgb24_to_yuv420_semi_planar_matches_planar() {
-        let w = 6;
-        let h = 4;
-        let src: Vec<u8> = (0..(w * h * 3)).map(|i| (i * 37 % 251) as u8).collect();
-        let mut nv12 = vec![0u8; w * h * 3 / 2];
-        let mut yuv420p = vec![0u8; w * h * 3 / 2];
-        rgb24_to_yuv420(&src, w, h, &mut nv12, true);
-        rgb24_to_yuv420(&src, w, h, &mut yuv420p, false);
-
-        let y_size = w * h;
-        let uv_count = w / 2 * h / 2;
-        assert_eq!(&nv12[..y_size], &yuv420p[..y_size]);
-        for i in 0..uv_count {
-            assert_eq!(nv12[y_size + i * 2], yuv420p[y_size + i]);
-            assert_eq!(nv12[y_size + i * 2 + 1], yuv420p[y_size + uv_count + i]);
-        }
-    }
-
-    #[test]
-    fn test_rail_hs_basic() {
-        let positions: Vec<i64> = rail_hs(30, 3).collect();
-        assert_eq!(positions, vec![0, 30, 60]);
-    }
-
-    #[test]
-    fn test_rail_hs_zero_rails() {
-        let positions: Vec<i64> = rail_hs(10, 0).collect();
-        assert_eq!(positions, vec![0]);
+    fn test_sprite_ink_bounds_empty() {
+        let sprite = RgbaImage::new(4, 8);
+        assert_eq!(sprite_ink_bounds(&sprite), None);
+        assert_eq!(sprite_ink_bounds(&RgbaImage::new(0, 0)), None);
     }
 
     #[test]
