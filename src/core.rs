@@ -607,17 +607,19 @@ pub(crate) fn video_process(
                         );
                         // 虚拟轨道数：该字号墨迹高度需要几个基础轨道（B站虚拟轨道机制）
                         let n_rails = compute_n_rails(ink_ref, base_pitch, d.font_size);
-                        let dead_line = match d.mode {
+                        let (travel, dead_line) = match d.mode {
                             DanmakuMode::Scroll | DanmakuMode::Reverse => {
                                 let travel_frames = (width + video_width).div_ceil(args.speed);
-                                dur + Duration::from_secs_f64(
+                                let travel = Duration::from_secs_f64(
                                     travel_frames as f64 * frame_duration_secs,
-                                )
+                                );
+                                (travel, dur + travel)
                             }
                             DanmakuMode::Top | DanmakuMode::Bottom => {
-                                dur + Duration::from_secs_f64(args.fixed_duration)
+                                let travel = Duration::from_secs_f64(args.fixed_duration);
+                                (travel, dur + travel)
                             }
-                            _ => Duration::from_millis(0),
+                            _ => (Duration::ZERO, Duration::from_millis(0)),
                         };
                         match d.mode {
                             DanmakuMode::Scroll => scroll_slots
@@ -628,6 +630,7 @@ pub(crate) fn video_process(
                                         y: None,
                                         width,
                                         n_rails,
+                                        travel,
                                         dead_line,
                                         cached_text: Some(cached_text),
                                     },
@@ -641,6 +644,7 @@ pub(crate) fn video_process(
                                         y: None,
                                         width,
                                         n_rails,
+                                        travel,
                                         dead_line,
                                         cached_text: Some(cached_text),
                                     },
@@ -654,6 +658,7 @@ pub(crate) fn video_process(
                                         y: None,
                                         width,
                                         n_rails,
+                                        travel,
                                         dead_line,
                                         cached_text: Some(cached_text),
                                     },
@@ -667,6 +672,7 @@ pub(crate) fn video_process(
                                         y: None,
                                         width,
                                         n_rails,
+                                        travel,
                                         dead_line,
                                         cached_text: Some(cached_text),
                                     },
@@ -688,6 +694,7 @@ pub(crate) fn video_process(
                         area_top: area_top as i64,
                         opacity: args.opacity,
                         min_space: args.min_space as i64,
+                        now: dur,
                     };
 
                     draw_scroll_danmukus(&mut draw_params, &mut scroll_slots, ToLeft);
@@ -801,6 +808,7 @@ struct DrawParams<'a> {
     area_top: i64,
     opacity: f64,
     min_space: i64,
+    now: Duration,
 }
 
 const RAIL_OFFSET: usize = 1000;
@@ -860,6 +868,7 @@ fn draw_fixed_danmukus(
     let mut occupieds = BitSet::with_capacity(cap);
     let mut ensure_y_q = Vec::new();
     let mut pending_y: Vec<(i64, u32)> = Vec::new();
+    let mut drop_q = Vec::new();
     for (idx, opt) in fixed_slots
         .iter()
         .enumerate()
@@ -898,6 +907,13 @@ fn draw_fixed_danmukus(
             mark_track_occupied(&mut occupieds, track, n_rails);
         }
 
+        // B站式丢弃：延迟放置的弹幕剩余寿命不足，直接不显示
+        if comp.dead_line.saturating_sub(params.now) < comp.travel {
+            drop_q.push(idx);
+            occupieds.reset();
+            continue;
+        }
+
         let Some(track) = find_free_track(&occupieds, comp.n_rails, params.rail_cnt, from_bottom)
         else {
             occupieds.reset();
@@ -919,6 +935,9 @@ fn draw_fixed_danmukus(
 
     for (idx, y) in ensure_y_q {
         fixed_slots[idx].as_mut().unwrap().1.y = Some(y);
+    }
+    for idx in drop_q {
+        fixed_slots[idx] = None;
     }
 }
 
@@ -962,6 +981,7 @@ fn draw_scroll_danmukus(
     let mut occupieds = BitSet::with_capacity(cap);
     let mut ensure_y_q = Vec::new();
     let mut pending_y: Vec<(i64, u32)> = Vec::new();
+    let mut drop_q = Vec::new();
     for (idx, opt) in scroll_slots
         .iter()
         .enumerate()
@@ -1007,6 +1027,13 @@ fn draw_scroll_danmukus(
             mark_track_occupied(&mut occupieds, track, n_rails);
         }
 
+        // B站式丢弃：延迟放置的弹幕剩余寿命不足以完整滚出，直接不显示
+        if comp.dead_line.saturating_sub(params.now) < comp.travel {
+            drop_q.push(idx);
+            occupieds.reset();
+            continue;
+        }
+
         let Some(track) = find_free_track(&occupieds, comp.n_rails, params.rail_cnt, false) else {
             occupieds.reset();
             continue;
@@ -1028,6 +1055,9 @@ fn draw_scroll_danmukus(
     for (idx, y) in ensure_y_q {
         scroll_slots[idx].as_mut().unwrap().1.y = Some(y);
     }
+    for idx in drop_q {
+        scroll_slots[idx] = None;
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1036,6 +1066,7 @@ struct NormalComponent {
     y: Option<i64>,
     width: u32,
     n_rails: u32,
+    travel: Duration,
     dead_line: Duration,
     cached_text: Option<RgbaImage>,
 }
@@ -1252,6 +1283,7 @@ mod tests {
             y: Some(0),
             width: 10,
             n_rails: 1,
+            travel: Duration::ZERO,
             dead_line: Duration::ZERO,
             cached_text: None,
         };
@@ -1266,6 +1298,7 @@ mod tests {
             y: Some(0),
             width: 10,
             n_rails: 1,
+            travel: Duration::ZERO,
             dead_line: Duration::ZERO,
             cached_text: None,
         };
@@ -1280,6 +1313,7 @@ mod tests {
             y: Some(10),
             width: 10,
             n_rails: 1,
+            travel: Duration::ZERO,
             dead_line: Duration::ZERO,
             cached_text: None,
         };
@@ -1288,6 +1322,7 @@ mod tests {
             y: None,
             width: 10,
             n_rails: 1,
+            travel: Duration::ZERO,
             dead_line: Duration::ZERO,
             cached_text: None,
         };
@@ -1314,6 +1349,7 @@ mod tests {
             y: None,
             width: 10,
             n_rails: 1,
+            travel: Duration::ZERO,
             dead_line: Duration::from_secs(10),
             cached_text: None,
         };
@@ -1339,6 +1375,7 @@ mod tests {
             y: None,
             width: 10,
             n_rails: 1,
+            travel: Duration::ZERO,
             dead_line: Duration::from_secs(10),
             cached_text: None,
         };
@@ -1364,6 +1401,7 @@ mod tests {
             y: None,
             width: 10,
             n_rails: 1,
+            travel: Duration::ZERO,
             dead_line: Duration::from_secs(10),
             cached_text: None,
         };
@@ -1373,5 +1411,115 @@ mod tests {
 
         del_dead(&mut slots, Duration::from_secs(10));
         assert!(slots[0].is_none());
+    }
+
+    fn danmaku_comp(
+        dead_line: Duration,
+        travel: Duration,
+        mode: DanmakuMode,
+    ) -> (Danmaku, NormalComponent) {
+        let dan = Danmaku {
+            time: Duration::from_secs(0),
+            mode,
+            font_size: 25,
+            color: Rgb([255, 255, 255]),
+            text: "测试".into(),
+        };
+        let comp = NormalComponent {
+            x: 100,
+            y: None,
+            width: 10,
+            n_rails: 1,
+            travel,
+            dead_line,
+            cached_text: Some(RgbaImage::new(10, 10)),
+        };
+        (dan, comp)
+    }
+
+    fn test_draw_params(image: &mut RgbImage, now: Duration) -> DrawParams {
+        DrawParams {
+            image,
+            base_pitch: 10,
+            rail_cnt: 4,
+            area_top: 0,
+            opacity: 1.0,
+            min_space: 0,
+            now,
+        }
+    }
+
+    #[test]
+    fn test_scroll_placed_when_remaining_equals_travel() {
+        let mut image = RgbImage::new(20, 40);
+        let mut slots = GrowableVec::new(None);
+        slots[0] = Some(danmaku_comp(
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            DanmakuMode::Scroll,
+        ));
+        let mut params = test_draw_params(&mut image, Duration::from_secs(5));
+        draw_scroll_danmukus(&mut params, &mut slots, ToLeft);
+        let y = slots[0].as_ref().unwrap().1.y;
+        assert_eq!(y, Some(0), "剩余寿命足够时应放置");
+    }
+
+    #[test]
+    fn test_scroll_dropped_when_remaining_less_than_travel() {
+        let mut image = RgbImage::new(20, 40);
+        let mut slots = GrowableVec::new(None);
+        slots[0] = Some(danmaku_comp(
+            Duration::from_secs(8),
+            Duration::from_secs(5),
+            DanmakuMode::Scroll,
+        ));
+        let mut params = test_draw_params(&mut image, Duration::from_secs(5));
+        draw_scroll_danmukus(&mut params, &mut slots, ToLeft);
+        assert!(slots[0].is_none(), "剩余寿命(3s) < travel(5s) 时应丢弃");
+    }
+
+    #[test]
+    fn test_scroll_kept_when_placed_immediately() {
+        let mut image = RgbImage::new(20, 40);
+        let mut slots = GrowableVec::new(None);
+        // 第一帧即放置：now == 入队时刻
+        let (dan, comp) = danmaku_comp(
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            DanmakuMode::Scroll,
+        );
+        slots[0] = Some((dan, comp));
+        let mut params = test_draw_params(&mut image, Duration::from_secs(5));
+        draw_scroll_danmukus(&mut params, &mut slots, ToLeft);
+        assert!(slots[0].is_some());
+        assert_eq!(slots[0].as_ref().unwrap().1.y, Some(0));
+    }
+
+    #[test]
+    fn test_fixed_dropped_when_remaining_less_than_travel() {
+        let mut image = RgbImage::new(20, 40);
+        let mut slots = GrowableVec::new(None);
+        slots[0] = Some(danmaku_comp(
+            Duration::from_secs(8),
+            Duration::from_secs(5),
+            DanmakuMode::Top,
+        ));
+        let mut params = test_draw_params(&mut image, Duration::from_secs(5));
+        draw_fixed_danmukus(&mut params, &mut slots, false);
+        assert!(slots[0].is_none(), "固定弹幕延迟放置同样丢弃");
+    }
+
+    #[test]
+    fn test_fixed_kept_when_remaining_equals_travel() {
+        let mut image = RgbImage::new(20, 40);
+        let mut slots = GrowableVec::new(None);
+        slots[0] = Some(danmaku_comp(
+            Duration::from_secs(10),
+            Duration::from_secs(5),
+            DanmakuMode::Top,
+        ));
+        let mut params = test_draw_params(&mut image, Duration::from_secs(5));
+        draw_fixed_danmukus(&mut params, &mut slots, false);
+        assert_eq!(slots[0].as_ref().unwrap().1.y, Some(0));
     }
 }
