@@ -1,8 +1,8 @@
 use std::ptr;
 
 use anyhow::{anyhow, Result};
-use ffmpeg_next as ffmpeg;
 use ffmpeg::ffi;
+use ffmpeg_next as ffmpeg;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HwCodec {
@@ -126,9 +126,7 @@ pub unsafe fn try_create_hardware_setup(
         ));
     }
 
-    Ok(HwSetup {
-        frames_ref,
-    })
+    Ok(HwSetup { frames_ref })
 }
 
 #[cfg(test)]

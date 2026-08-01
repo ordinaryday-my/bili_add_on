@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use anyhow::{Context, anyhow, bail};
 use crate::utils::decode_bytes;
+use anyhow::{anyhow, bail, Context};
 
 pub fn get_cid_from_api(bvid: &str) -> anyhow::Result<u64> {
     let url = format!("https://api.bilibili.com/x/web-interface/view?bvid={bvid}");
@@ -44,7 +44,8 @@ pub fn get_danmaku_xml(cid: u64) -> anyhow::Result<String> {
         .bytes()
         .with_context(|| format!("读取弹幕xml响应体失败 (cid: {cid})"))?;
 
-    let bytes = maybe_decompress(&bytes).context("弹幕XML数据解压（deflate）失败，数据可能损坏或使用了不支持的压缩格式")?;
+    let bytes = maybe_decompress(&bytes)
+        .context("弹幕XML数据解压（deflate）失败，数据可能损坏或使用了不支持的压缩格式")?;
 
     decode_bytes(bytes, &content_type)
 }
