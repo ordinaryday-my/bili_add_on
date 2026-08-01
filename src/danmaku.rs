@@ -350,15 +350,14 @@ pub fn get_danmuku_xml_from_file(file: &Path) -> anyhow::Result<String> {
 }
 
 pub fn filter_danmakus(danmakus: Vec<Danmaku>, filters: &[Regex]) -> Vec<Danmaku> {
-    let after = danmakus
+    danmakus
         .into_iter()
         .filter(|dan| {
             !filters
                 .iter()
                 .any(|regex| regex.is_match(dan.text.as_str()))
         })
-        .collect::<Vec<_>>();
-    after
+        .collect::<Vec<_>>()
 }
 
 #[cfg(test)]

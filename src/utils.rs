@@ -33,6 +33,11 @@ impl<T> GrowableVec<T> {
     pub fn len(&self) -> usize {
         self.inner.len()
     }
+
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl<U> GrowableVec<Option<U>>

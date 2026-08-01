@@ -260,10 +260,8 @@ impl VideoDecoder {
             let stop_at = max_deadline + step.max(self.extend_frame_duration);
             let next_ts = self.last_ts.map_or(0.0, |t| t + step);
             if next_ts < stop_at {
-                if let Some((_, end)) = self.range {
-                    if next_ts >= end {
-                        return Ok(None);
-                    }
+                if let Some((_, end)) = self.range && next_ts >= end {
+                    return Ok(None);
                 }
                 self.last_ts = Some(next_ts);
                 self.extended_count += 1;

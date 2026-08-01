@@ -850,7 +850,7 @@ fn find_free_track(
 /// `ink_ref` 为标准字号（25）在 `font_scale` 下的墨迹高度；其余字号按比例缩放。
 fn compute_n_rails(ink_ref: u32, base_pitch: u32, font_size: usize) -> u32 {
     let ink_h_font = (ink_ref as u64 * font_size as u64).div_ceil(25) as u32;
-    ((ink_h_font + base_pitch - 1) / base_pitch).max(1)
+    ink_h_font.div_ceil(base_pitch).max(1)
 }
 
 fn mark_track_occupied(occupieds: &mut BitSet, track: u32, n_rails: u32) {
@@ -1437,7 +1437,7 @@ mod tests {
         (dan, comp)
     }
 
-    fn test_draw_params(image: &mut RgbImage, now: Duration) -> DrawParams {
+    fn test_draw_params(image: &mut RgbImage, now: Duration) -> DrawParams<'_> {
         DrawParams {
             image,
             base_pitch: 10,
