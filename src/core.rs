@@ -463,7 +463,20 @@ pub(crate) fn video_process(
     mut danmakus: Vec<Danmaku>,
     args: &Args,
     frame_duration_secs: f64,
+    range: Option<(f64, f64)>,
 ) -> Result<()> {
+    if let Some((start, end)) = range {
+        decoder.set_range(start, end);
+        danmakus.retain(|dan| {
+            let t = dan.time.as_secs_f64();
+            t >= start && t < end
+        });
+        let shift = Duration::from_secs_f64(start);
+        for dan in &mut danmakus {
+            dan.time = dan.time.saturating_sub(shift);
+        }
+    }
+
     danmakus.sort_unstable_by_key(|dan| std::cmp::Reverse(dan.time));
 
     let (video_width, video_height) = decoder.size();
@@ -502,14 +515,19 @@ pub(crate) fn video_process(
     let rail_cnt = area_height / base_pitch;
 
     let mut frame_count = 0u64;
-    let mut total_frames = decoder.frame_count();
+    let mut total_frames = match range {
+        Some((start, end)) => ((end - start) / frame_duration_secs).ceil() as u64,
+        None => decoder.frame_count(),
+    };
     let total_reporter = Arc::new(AtomicU64::new(0));
 
     if args.longest {
-        let video_duration = if decoder.frame_rate() > 0.0 {
-            decoder.frame_count() as f64 / decoder.frame_rate() as f64
-        } else {
-            0.0
+        let video_duration = match range {
+            Some((start, end)) => end - start,
+            None if decoder.frame_rate() > 0.0 => {
+                decoder.frame_count() as f64 / decoder.frame_rate() as f64
+            }
+            _ => 0.0,
         };
         let max_deadline = compute_max_danmaku_deadline(
             &danmakus,
@@ -519,7 +537,11 @@ pub(crate) fn video_process(
             frame_duration_secs,
         );
         if max_deadline > video_duration {
-            decoder.set_extend_to(max_deadline, frame_duration_secs);
+            let ext_stop_orig = match range {
+                Some((start, end)) => (max_deadline + start).min(end),
+                None => max_deadline,
+            };
+            decoder.set_extend_to(ext_stop_orig, frame_duration_secs);
             total_frames =
                 ((max_deadline + frame_duration_secs) / frame_duration_secs).ceil() as u64;
         }
@@ -561,6 +583,7 @@ pub(crate) fn video_process(
             .spawn_scoped(s, move || -> Result<()> {
                 let mut last_progress =
                     Instant::now() - Duration::from_millis(PROGRESS_INTERVAL_MS);
+                let mut final_shown = false;
                 loop {
                     let Ok((ts_secs, dur, mut image)) = decode_r.recv() else {
                         break;
@@ -702,8 +725,18 @@ pub(crate) fn video_process(
                         {
                             render_progress(frame_count, total_frames, exact);
                             last_progress = now;
+                            if is_final {
+                                final_shown = true;
+                            }
                         }
                     }
+                }
+
+                // 收尾刷新：解码线程在通道关闭前已写入精确总数，
+                // 补打一次确保进度条走到 100%
+                if !args.quiet && !final_shown {
+                    let exact = total_reporter.load(Ordering::Relaxed);
+                    render_progress(frame_count, total_frames, exact);
                 }
 
                 Ok(())

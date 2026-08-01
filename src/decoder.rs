@@ -7,13 +7,13 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use ffmpeg_next as ffmpeg;
 use ffmpeg::{
     codec::context::Context as AvContext,
     media::Type as MediaType,
     software::scaling::{context::Context as Scaler, flag::Flags as ScalerFlags},
     util::error::EAGAIN,
 };
+use ffmpeg_next as ffmpeg;
 use image::RgbImage;
 
 pub struct VideoDecoder {
@@ -34,6 +34,8 @@ pub struct VideoDecoder {
     extended_count: u64,
     total_reporter: Option<Arc<AtomicU64>>,
     total_reported: bool,
+    range: Option<(f64, f64)>,
+    seeked: bool,
 }
 
 impl VideoDecoder {
@@ -74,17 +76,13 @@ impl VideoDecoder {
         let mut ctx = AvContext::new();
         ctx.set_parameters(stream.parameters())?;
 
-        let decoder = ctx
-            .decoder()
-            .video()
-            .context("创建视频解码器失败")?;
+        let decoder = ctx.decoder().video().context("创建视频解码器失败")?;
 
         let width = decoder.width();
         let height = decoder.height();
         let decoder_format = decoder.format();
 
-        if decoder_format == ffmpeg::util::format::pixel::Pixel::None || width == 0 || height == 0
-        {
+        if decoder_format == ffmpeg::util::format::pixel::Pixel::None || width == 0 || height == 0 {
             return Err(anyhow!(
                 "视频流参数无效: 格式={decoder_format:?}, 尺寸={width}x{height}"
             ));
@@ -119,6 +117,8 @@ impl VideoDecoder {
             extended_count: 0,
             total_reporter: None,
             total_reported: false,
+            range: None,
+            seeked: false,
         })
     }
 
@@ -146,12 +146,48 @@ impl VideoDecoder {
         self.total_reporter = Some(reporter);
     }
 
+    /// 设置处理时段 `[start, end)`（原始时间轴，秒）。
+    ///
+    /// 首次读取时跳转到起始附近并丢弃之前的帧；读取到达 `end` 后停止；
+    /// 返回的时间戳统一减去 `start`（输出时间轴从 0 开始）。
+    pub fn set_range(&mut self, start: f64, end: f64) {
+        debug_assert!(end > start);
+        self.range = Some((start, end));
+    }
+
+    fn report_total_once(&mut self) {
+        if !self.total_reported {
+            self.report_total();
+            self.total_reported = true;
+        }
+    }
+
+    fn seek_to_range_start(&mut self) -> Result<()> {
+        let (start, _) = self.range.unwrap();
+        if start > 0.0 {
+            let target = (start * ffmpeg::ffi::AV_TIME_BASE as f64) as i64;
+            self.input
+                .seek(target, ..target.saturating_add(1))
+                .context("跳转到起始时间失败")?;
+            self.decoder.flush();
+        }
+        self.draining = false;
+        self.last_ts = None;
+        self.seeked = true;
+        Ok(())
+    }
+
     pub fn next_frame_into(&mut self, reuse: &mut RgbImage) -> Result<Option<f64>> {
         assert_eq!(reuse.dimensions(), (self.width, self.height));
         self.read_into(reuse)
     }
 
     fn read_into(&mut self, image: &mut RgbImage) -> Result<Option<f64>> {
+        if self.range.is_some() && !self.seeked {
+            self.seek_to_range_start()?;
+        }
+        let range = self.range;
+
         let mut decoded = ffmpeg::util::frame::video::Video::empty();
 
         loop {
@@ -170,6 +206,19 @@ impl VideoDecoder {
                         })
                         .unwrap_or(0.0);
 
+                    if let Some((start, end)) = range {
+                        if ts_secs < start {
+                            continue;
+                        }
+                        if ts_secs >= end {
+                            // 提前停止路径上扩展帧不可达（未到 EOF），
+                            // 清除扩展上限避免总数虚报扩展帧。
+                            self.extend_max_deadline = None;
+                            self.report_total_once();
+                            return Ok(None);
+                        }
+                    }
+
                     if let Some(prev) = self.last_ts {
                         let interval = ts_secs - prev;
                         if interval > 0.0 {
@@ -181,7 +230,11 @@ impl VideoDecoder {
 
                     avframe_rgb24_to_image(&rgb, image)?;
 
-                    return Ok(Some(ts_secs));
+                    let shifted = match range {
+                        Some((start, _)) => ts_secs - start,
+                        None => ts_secs,
+                    };
+                    return Ok(Some(shifted));
                 }
                 Err(ffmpeg::Error::Other { errno }) if errno == EAGAIN => {
                     if self.draining {
@@ -189,9 +242,7 @@ impl VideoDecoder {
                     }
                     let found = self.drain_next_packet()?;
                     if !found {
-                        self.decoder
-                            .send_eof()
-                            .context("解码器发送 EOF 失败")?;
+                        self.decoder.send_eof().context("解码器发送 EOF 失败")?;
                         self.draining = true;
                     }
                 }
@@ -202,16 +253,18 @@ impl VideoDecoder {
     }
 
     fn maybe_extend(&mut self, image: &mut RgbImage) -> Result<Option<f64>> {
-        if !self.total_reported {
-            self.report_total();
-            self.total_reported = true;
-        }
+        self.report_total_once();
 
         if let Some(max_deadline) = self.extend_max_deadline {
             let step = self.extension_step();
             let stop_at = max_deadline + step.max(self.extend_frame_duration);
             let next_ts = self.last_ts.map_or(0.0, |t| t + step);
             if next_ts < stop_at {
+                if let Some((_, end)) = self.range {
+                    if next_ts >= end {
+                        return Ok(None);
+                    }
+                }
                 self.last_ts = Some(next_ts);
                 self.extended_count += 1;
                 image.fill(0);
@@ -235,8 +288,7 @@ impl VideoDecoder {
         if let Some(reporter) = &self.total_reporter {
             let total = if let Some(max_deadline) = self.extend_max_deadline {
                 let step = self.extension_step();
-                let stop_at =
-                    max_deadline + step.max(self.extend_frame_duration);
+                let stop_at = max_deadline + step.max(self.extend_frame_duration);
                 let mut extended = 0u64;
                 let mut ts = self.last_ts.map_or(0.0, |t| t);
                 while ts + step < stop_at {
@@ -287,9 +339,7 @@ fn avframe_rgb24_to_image(
         );
 
         if ret < 0 {
-            return Err(anyhow!(
-                "AVFrame 到 RGB 图像转换失败: 错误码 {ret}"
-            ));
+            return Err(anyhow!("AVFrame 到 RGB 图像转换失败: 错误码 {ret}"));
         }
 
         Ok(())

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::Parser;
 use regex::Regex;
 use std::{cmp::Ordering, ffi::OsString, path::PathBuf};
@@ -83,6 +83,13 @@ pub struct Args {
 
     #[arg(long, help = "弹幕过滤条件（regex）", value_delimiter = ',')]
     pub filter: Option<Vec<String>>,
+
+    #[arg(
+        long,
+        value_name = "TIME_RANGE",
+        help = "视频处理时段：{起始}-{结束} 或 {结束}；时间格式为 时:分:秒 / 分:秒 / 秒，如 1:23-5:00、162:12、3.1415926"
+    )]
+    pub range: Option<String>,
 }
 
 impl Args {
@@ -166,6 +173,10 @@ impl Args {
             );
         }
 
+        if let Some(range) = &self.range {
+            parse_time_range(range)?;
+        }
+
         Ok(())
     }
 
@@ -194,6 +205,78 @@ impl Args {
 
         Some(res)
     }
+}
+
+/// 解析单个时间点：`时:分:秒` / `分:秒` / `秒`。
+///
+/// 时、分必须为非负整数，秒必须为非负浮点数（拒绝 NaN/Infinity/负数）。
+pub fn parse_time_point(s: &str) -> Result<f64> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.is_empty() || parts.len() > 3 {
+        bail!("时间格式无效: '{s}'（应为 时:分:秒 / 分:秒 / 秒）");
+    }
+    if parts.iter().any(|p| p.is_empty()) {
+        bail!("时间格式无效: '{s}'（存在空的时间分量）");
+    }
+
+    let parse_component = |p: &str, name: &str| -> Result<u64> {
+        p.parse::<u64>()
+            .with_context(|| format!("时间分量 '{name}' 不是非负整数: '{p}'（位于 '{s}'）"))
+    };
+    let parse_secs = |p: &str| -> Result<f64> {
+        let v: f64 = p
+            .parse()
+            .with_context(|| format!("秒分量不是有效数字: '{p}'（位于 '{s}'）"))?;
+        if !v.is_finite() || v < 0.0 {
+            bail!("秒分量必须为非负有限数值: '{p}'（位于 '{s}'）");
+        }
+        Ok(v)
+    };
+
+    match parts.as_slice() {
+        [secs] => parse_secs(secs),
+        [mins, secs] => {
+            let m = parse_component(mins, "分")?;
+            let s = parse_secs(secs)?;
+            Ok(m as f64 * 60.0 + s)
+        }
+        [hours, mins, secs] => {
+            let h = parse_component(hours, "时")?;
+            let m = parse_component(mins, "分")?;
+            let s = parse_secs(secs)?;
+            Ok(h as f64 * 3600.0 + m as f64 * 60.0 + s)
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// 解析视频处理时段：`{起始}-{结束}` 或 `{结束}`（起始为 0）。
+///
+/// 返回 `(start, end)`（秒），保证 `start < end` 且均非负。
+pub fn parse_time_range(s: &str) -> Result<(f64, f64)> {
+    if s.is_empty() {
+        bail!("--range 参数为空");
+    }
+
+    let (start, end) = match s.split_once('-') {
+        Some((start, end)) => {
+            let start = parse_time_point(start)
+                .with_context(|| format!("起始时间无效（--range '{s}'）"))?;
+            let end =
+                parse_time_point(end).with_context(|| format!("结束时间无效（--range '{s}'）"))?;
+            (start, end)
+        }
+        None => {
+            let end =
+                parse_time_point(s).with_context(|| format!("结束时间无效（--range '{s}'）"))?;
+            (0.0, end)
+        }
+    };
+
+    if start >= end {
+        bail!("--range 的起始时间 ({start} 秒) 必须小于结束时间 ({end} 秒)");
+    }
+    Ok((start, end))
 }
 
 #[derive(clap::Args, Debug)]
@@ -231,6 +314,7 @@ mod tests {
             encoder: "auto".to_string(),
             longest: false,
             filter: Some(vec![]),
+            range: None,
         }
     }
 
@@ -256,6 +340,7 @@ mod tests {
             encoder: "auto".to_string(),
             longest: false,
             filter: Some(vec![]),
+            range: None,
         };
 
         args.check_output().unwrap();
@@ -346,5 +431,91 @@ mod tests {
         use clap::Parser;
         let args = Args::try_parse_from(["bili_add_on", "--input", "video.mp4"]);
         assert!(args.is_err());
+    }
+
+    #[test]
+    fn test_parse_time_point_seconds() {
+        assert!((parse_time_point("3.1415926").unwrap() - 3.1415926).abs() < 1e-9);
+        assert!((parse_time_point("0").unwrap() - 0.0).abs() < 1e-9);
+        assert!((parse_time_point("0.5").unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_time_point_minutes_seconds() {
+        assert!((parse_time_point("162:12").unwrap() - 9732.0).abs() < 1e-9);
+        assert!((parse_time_point("0:30").unwrap() - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_time_point_hours_minutes_seconds() {
+        assert!((parse_time_point("1:23:2.21").unwrap() - 4982.21).abs() < 1e-9);
+        assert!((parse_time_point("0:0:0.5").unwrap() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_time_point_invalid() {
+        assert!(parse_time_point("abc").is_err());
+        assert!(parse_time_point("1:2:3:4").is_err());
+        assert!(parse_time_point("1:2:").is_err());
+        assert!(parse_time_point(":2").is_err());
+        assert!(parse_time_point("-5").is_err());
+        assert!(parse_time_point("1:-2:3").is_err());
+        assert!(parse_time_point("1.5:2").is_err());
+        assert!(parse_time_point("NaN").is_err());
+        assert!(parse_time_point("Infinity").is_err());
+        assert!(parse_time_point("").is_err());
+    }
+
+    #[test]
+    fn test_parse_time_range_end_only() {
+        let (start, end) = parse_time_range("162:12").unwrap();
+        assert!((start - 0.0).abs() < 1e-9);
+        assert!((end - 9732.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_time_range_full() {
+        let (start, end) = parse_time_range("1:23-5:00").unwrap();
+        assert!((start - 83.0).abs() < 1e-9);
+        assert!((end - 300.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_time_range_mixed_formats() {
+        let (start, end) = parse_time_range("0:30-1:23:2.21").unwrap();
+        assert!((start - 30.0).abs() < 1e-9);
+        assert!((end - 4982.21).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_parse_time_range_invalid() {
+        assert!(parse_time_range("").is_err());
+        assert!(parse_time_range("10-5").is_err());
+        assert!(parse_time_range("5-5").is_err());
+        assert!(parse_time_range("1:23-").is_err());
+        assert!(parse_time_range("-5:00").is_err());
+        assert!(parse_time_range("abc-def").is_err());
+    }
+
+    #[test]
+    fn test_check_rejects_invalid_range() {
+        let mut args = default_args();
+        args.range = Some("10-5".to_string());
+        assert!(args.check().is_err());
+        args.range = Some("1:2:3:4-5".to_string());
+        assert!(args.check().is_err());
+    }
+
+    #[test]
+    fn test_check_accepts_valid_range() {
+        let tmp = std::env::temp_dir().join("bili_add_on_range_test.mp4");
+        std::fs::write(&tmp, b"fake").unwrap();
+        let mut args = default_args();
+        args.input = tmp.clone();
+        args.range = Some("1:23-5:00".to_string());
+        assert!(args.check().is_ok());
+        args.range = Some("162:12".to_string());
+        assert!(args.check().is_ok());
+        std::fs::remove_file(&tmp).unwrap();
     }
 }

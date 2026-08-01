@@ -1,12 +1,17 @@
 use std::{fs, process::exit, time::Instant};
 
-use anyhow::{anyhow, Context};
+use anyhow::{anyhow, bail, Context};
 use clap::Parser;
 #[cfg(not(feature = "dhat-heap"))]
 use mimalloc::MiMalloc;
 
 use crate::{
-    core::{EncoderPref, same_specifications, video_process}, danmaku::{filter_danmakus, get_danmuku_xml_by_bili_id, get_danmuku_xml_from_file, parse_danmakus}, decoder::VideoDecoder, interaction::Args,
+    core::{same_specifications, video_process, EncoderPref},
+    danmaku::{
+        filter_danmakus, get_danmuku_xml_by_bili_id, get_danmuku_xml_from_file, parse_danmakus,
+    },
+    decoder::VideoDecoder,
+    interaction::Args,
 };
 
 mod audio;
@@ -51,6 +56,13 @@ fn run() -> anyhow::Result<()> {
         .transpose()
         .context("--filter参数转换失败")?;
 
+    let range = args
+        .range
+        .as_deref()
+        .map(interaction::parse_time_range)
+        .transpose()
+        .context("--range 参数解析失败")?;
+
     let xml = if let Some(id) = &args.source.bvid {
         get_danmuku_xml_by_bili_id(id)
             .with_context(|| format!("获取B站弹幕数据失败 (bvid: {id})"))?
@@ -76,7 +88,7 @@ fn run() -> anyhow::Result<()> {
         after
     } else {
         danmakus
-    };    
+    };
 
     ffmpeg_next::init()
         .map_err(|e| anyhow!("{e}"))
@@ -109,6 +121,17 @@ fn run() -> anyhow::Result<()> {
         )
     })?;
 
+    if let Some((start, _)) = range {
+        let video_duration = if decoder.frame_rate() > 0.0 {
+            decoder.frame_count() as f64 / decoder.frame_rate() as f64
+        } else {
+            0.0
+        };
+        if start >= video_duration {
+            bail!("--range 起始时间 ({start} 秒) 超出视频时长 ({video_duration:.3} 秒)");
+        }
+    }
+
     let encoder_pref = match args.encoder.as_str() {
         "auto" => EncoderPref::Auto,
         "software" => EncoderPref::Software,
@@ -129,7 +152,7 @@ fn run() -> anyhow::Result<()> {
     if !args.quiet {
         eprintln!("正在渲染弹幕到视频帧...");
     }
-    video_process(decoder, encoder, danmakus, &args, frame_duration)
+    video_process(decoder, encoder, danmakus, &args, frame_duration, range)
         .context("视频处理流程失败（弹幕渲染到视频帧时出错）")?;
 
     if args.no_audio || !audio::has_audio(&args.input).unwrap_or(false) {
@@ -144,7 +167,8 @@ fn run() -> anyhow::Result<()> {
         if !args.quiet {
             eprintln!("正在合并音频轨道...");
         }
-        audio::remux_audio(&temp_path, &args.input, &output_path).context("音频混流失败")?;
+        audio::remux_audio_range(&temp_path, &args.input, &output_path, range)
+            .context("音频混流失败")?;
     }
 
     if !args.quiet {

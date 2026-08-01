@@ -19,7 +19,16 @@ pub fn has_audio(path: &Path) -> Result<bool> {
     Ok(found)
 }
 
-pub fn remux_audio(video_temp: &Path, original: &Path, output: &Path) -> Result<()> {
+/// 将临时视频与原始视频的音频流合并到输出文件，仅保留 `[start, end)` 时段
+/// （原始时间轴，秒）的音频包，并将其时间戳减去 `start` 以对齐裁剪后的视频。
+///
+/// `range == None` 时保留全部音频。
+pub fn remux_audio_range(
+    video_temp: &Path,
+    original: &Path,
+    output: &Path,
+    range: Option<(f64, f64)>,
+) -> Result<()> {
     let mut audio_ictx = ffmpeg::format::input(original)
         .with_context(|| format!("无法打开原文件以提取音频: {}", original.display()))?;
 
@@ -45,7 +54,24 @@ pub fn remux_audio(video_temp: &Path, original: &Path, output: &Path) -> Result<
 
     for (stream, packet) in audio_ictx.packets() {
         if stream.parameters().medium() == ffmpeg::media::Type::Audio {
-            audio_packets.push((stream.index(), stream.time_base(), packet));
+            if let Some((start, end)) = range {
+                let tb = stream.time_base();
+                let to_secs = |v: i64| v as f64 * tb.numerator() as f64 / tb.denominator() as f64;
+                let Some(pts) = packet.pts() else {
+                    continue;
+                };
+                let ts = to_secs(pts);
+                if ts < start || ts >= end {
+                    continue;
+                }
+                let mut packet = packet;
+                let shift_units = (start * tb.denominator() as f64 / tb.numerator() as f64) as i64;
+                packet.set_pts(packet.pts().map(|p| p - shift_units));
+                packet.set_dts(packet.dts().map(|d| d - shift_units));
+                audio_packets.push((stream.index(), tb, packet));
+            } else {
+                audio_packets.push((stream.index(), stream.time_base(), packet));
+            }
         }
     }
     drop(audio_ictx);
@@ -94,8 +120,7 @@ pub fn remux_audio(video_temp: &Path, original: &Path, output: &Path) -> Result<
     }
 
     octx.set_metadata(video_ictx.metadata().to_owned());
-    octx.write_header()
-        .context("写入输出文件头失败")?;
+    octx.write_header().context("写入输出文件头失败")?;
 
     let ost_time_bases: Vec<ffmpeg::Rational> = (0..ost_count)
         .map(|i| {
@@ -129,8 +154,7 @@ pub fn remux_audio(video_temp: &Path, original: &Path, output: &Path) -> Result<
         }
     }
 
-    octx.write_trailer()
-        .context("写入输出文件尾失败")?;
+    octx.write_trailer().context("写入输出文件尾失败")?;
 
     Ok(())
 }
