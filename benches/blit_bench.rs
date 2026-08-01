@@ -43,14 +43,6 @@ fn bench_blit_cached_text_small(c: &mut Criterion) {
     });
 }
 
-fn bench_rail_hs(c: &mut Criterion) {
-    c.bench_function("rail_hs_line30_cnt30", |b| {
-        b.iter(|| {
-            let _: Vec<_> = utils::rail_hs(black_box(30), black_box(30)).collect();
-        })
-    });
-}
-
 fn bench_fix_bili_xml_small(c: &mut Criterion) {
     let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
 <i>
@@ -93,7 +85,6 @@ criterion_group!(
     benches,
     bench_blit_cached_text_fully_visible,
     bench_blit_cached_text_small,
-    bench_rail_hs,
     bench_fix_bili_xml_small,
     bench_decode_rgb,
     bench_decode_bytes_utf8,
