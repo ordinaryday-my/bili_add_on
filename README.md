@@ -40,6 +40,8 @@ bili_add_on --input input.mp4 --xml danmaku.xml
 | `--top-ratio` | `-t` | `0.0` | 弹幕显示区域上界与画面高度比值，0 为顶端 |
 | `--bottom-ratio` | `-b` | `1.0` | 弹幕显示区域下界与画面高度比值，1 为底端 |
 | `--font-scale` | | `1.0` | 弹幕字号缩放比 |
+| `--font` | | | 用户字体文件路径（ttf/otf/ttc），可重复传入多个，按传入顺序依次降级 |
+| `--system-fonts` | | `false` | 启用系统字体作为回退 |
 | `--speed` | `-s` | `3` | 弹幕滚动速度（像素每帧） |
 | `--line-spacing` | | `4` | 弹幕行间距（像素） |
 | `--fixed-duration` | | `5.0` | 固定弹幕（顶部/底部）的持续时间（秒） |
@@ -89,6 +91,47 @@ bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx --top-ratio 0.0 --bottom-rati
 | BAS 弹幕 | 9 | 特殊底部弹幕 |
 
 高级弹幕（mode 7）当前仅解析，不参与渲染。
+
+## 字体与字符覆盖
+
+工具基于 cosmic-text 做字形级字体回退，字符缺失时会自动在字体链中逐级查找。
+
+### 优先级
+
+| `--font` | `--system-fonts` | 回退顺序 |
+|----------|------------------|----------|
+| 未提供 | 关（默认） | 项目内置字体 |
+| 已提供 | 关 | 用户字体 → 项目内置字体 |
+| 已提供 | 开 | 用户字体 → 系统字体 → 项目内置字体 |
+| 未提供 | 开 | 系统字体 → 项目内置字体 |
+
+多个 `--font` 按传入顺序依次降级：
+
+```bash
+bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx \
+    --font noto-emoji.ttf --font noto-symbols.ttf
+```
+
+### 项目内置字体
+
+| 字体 | 覆盖 |
+|------|------|
+| 思源黑体（Source Han Sans SC） | 中日韩、拉丁等主要文字 |
+| Noto Sans Symbols 2 | 货币、数学、杂项符号（如 ☑） |
+| Noto Sans Symbols（9 个字重） | 箭头、Dingbats 装饰符号（如 ✟✝） |
+
+内置字体以 OpenType cmap 的 Unicode 完整子表（format 12）为准，与系统字体共用同一套回退逻辑。
+
+### 推荐
+
+- **符号类（✟ 等 Dingbats）**：Windows 下开启 `--system-fonts` 即可由 Segoe UI Symbol 覆盖；跨平台可用 `--font` 传入 Noto Sans Symbols
+- **emoji**：`--font` 传入 Noto Color Emoji（系统自带 Segoe UI Emoji 可在开启 `--system-fonts` 后覆盖）
+- 组合示例（覆盖符号 + emoji）：
+
+```bash
+bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx \
+    --font NotoSansSymbols-Regular.ttf --font NotoColorEmoji.ttf
+```
 
 ## 输出格式
 

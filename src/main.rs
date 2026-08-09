@@ -18,6 +18,7 @@ mod audio;
 mod core;
 mod danmaku;
 mod decoder;
+mod fonts;
 mod hw;
 mod interaction;
 mod utils;

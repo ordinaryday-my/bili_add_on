@@ -9,12 +9,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ab_glyph::{FontVec, PxScale};
 use anyhow::{anyhow, Context, Result};
 use bit_set::BitSet;
 use crossbeam_channel::bounded;
-use image::{RgbImage, Rgba, RgbaImage};
-use imageproc::drawing::{draw_text_mut, text_size};
+use image::{Rgb, RgbImage, RgbaImage};
 
 use ffmpeg_next as ffmpeg;
 
@@ -22,6 +20,7 @@ use crate::{
     core::Direction::{ToLeft, ToRight},
     danmaku::{Danmaku, DanmakuMode},
     decoder::VideoDecoder,
+    fonts::FontStack,
     hw,
     interaction::Args,
     utils::{blit_cached_text, sprite_ink_bounds, GrowableVec, Ignore},
@@ -431,7 +430,7 @@ impl FfmpegEncoder {
 
 fn compute_max_danmaku_deadline(
     danmakus: &[Danmaku],
-    regular: &FontVec,
+    fonts: &mut FontStack,
     args: &Args,
     video_width: u32,
     frame_duration_secs: f64,
@@ -440,8 +439,7 @@ fn compute_max_danmaku_deadline(
     for dan in danmakus {
         let deadline_secs = match dan.mode {
             DanmakuMode::Scroll | DanmakuMode::Reverse => {
-                let scale = PxScale::from((dan.font_size as f32) * args.font_scale);
-                let (text_width, _) = text_size(scale, regular, &dan.text);
+                let (text_width, _) = fonts.text_size(&dan.text, (dan.font_size as f32) * args.font_scale);
                 let travel_frames = (text_width + video_width).div_ceil(args.speed);
                 dan.time.as_secs_f64() + travel_frames as f64 * frame_duration_secs
             }
@@ -489,24 +487,13 @@ pub(crate) fn video_process(
     let mut bottom_slots: GrowableVec<Option<(Danmaku, NormalComponent)>> = GrowableVec::new(None);
     let mut reverse_slots: GrowableVec<Option<(Danmaku, NormalComponent)>> = GrowableVec::new(None);
 
-    static SOURCE_FONT: &[u8] = include_bytes!("../fonts/SourceHanSansSC-Regular-2.otf");
-    let regular = FontVec::try_from_vec(SOURCE_FONT.to_vec())
-        .expect("内置字体加载失败: SourceHanSansSC-Regular-2.otf，字体文件可能已损坏或不存在");
+    let mut fonts = FontStack::load(args).context("字体加载失败")?;
 
     // 标准字号（25 × font_scale）参考墨迹高度：轨道基准间距 = 墨迹高度 + line_spacing，
     // 保证标准字号弹幕的相邻行视觉间隙恰为 line_spacing（轨道间无死区）。
-    let std_scale = PxScale::from(25.0 * args.font_scale);
-    let (sample_w, sample_h) = text_size(std_scale, &regular, "字");
+    let (sample_w, sample_h) = fonts.text_size("字", 25.0 * args.font_scale);
     let mut sample_img = RgbaImage::new(sample_w, sample_h);
-    draw_text_mut(
-        &mut sample_img,
-        Rgba([255, 255, 255, 255]),
-        0,
-        0,
-        std_scale,
-        &regular,
-        "字",
-    );
+    fonts.draw_text(&mut sample_img, "字", 25.0 * args.font_scale, Rgb([255, 255, 255]));
     let ink_ref = sprite_ink_bounds(&sample_img)
         .map(|(t, b)| b.saturating_sub(t))
         .unwrap_or(1)
@@ -531,7 +518,7 @@ pub(crate) fn video_process(
         };
         let max_deadline = compute_max_danmaku_deadline(
             &danmakus,
-            &regular,
+            &mut fonts,
             args,
             video_width,
             frame_duration_secs,
@@ -592,19 +579,11 @@ pub(crate) fn video_process(
                     let enqueue = danmakus.drain(ready_idx..).rev();
 
                     for d in enqueue {
-                        let scale = PxScale::from((d.font_size as f32) * args.font_scale);
-                        let (width, height) = text_size(scale, &regular, &d.text);
+                        let scale = (d.font_size as f32) * args.font_scale;
+                        let (width, height) = fonts.text_size(&d.text, scale);
                         let color = d.color;
                         let mut cached_text = RgbaImage::new(width, height);
-                        draw_text_mut(
-                            &mut cached_text,
-                            Rgba([color[0], color[1], color[2], 255]),
-                            0,
-                            0,
-                            scale,
-                            &regular,
-                            &d.text,
-                        );
+                        fonts.draw_text(&mut cached_text, &d.text, scale, color);
                         // 虚拟轨道数：该字号墨迹高度需要几个基础轨道（B站虚拟轨道机制）
                         let n_rails = compute_n_rails(ink_ref, base_pitch, d.font_size);
                         let (travel, dead_line) = match d.mode {

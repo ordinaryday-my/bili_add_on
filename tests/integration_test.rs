@@ -46,7 +46,7 @@ fn test_cli_default_values() {
     assert!((args.opacity - 0.93).abs() < f64::EPSILON);
     assert!((args.top_ratio - 0.0).abs() < f64::EPSILON);
     assert!((args.bottom_ratio - 1.0).abs() < f64::EPSILON);
-    assert!(args.font_scale - 1.0 < f32::EPSILON);
+    assert!((args.font_scale - 1.0).abs() < f32::EPSILON);
     assert_eq!(args.speed, 3);
     assert_eq!(args.line_spacing, 4);
     assert!((args.fixed_duration - 5.0).abs() < f64::EPSILON);

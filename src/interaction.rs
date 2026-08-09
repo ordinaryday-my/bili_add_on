@@ -41,6 +41,20 @@ pub struct Args {
     #[arg(long, default_value_t = 1.0, help = "弹幕字号缩放比")]
     pub font_scale: f32,
 
+    #[arg(
+        long,
+        value_name = "FONT_FILE",
+        help = "用户字体文件路径（ttf/otf/ttc），可重复传入多个，按传入顺序依次降级；优先级高于系统字体与项目内置字体"
+    )]
+    pub font: Vec<PathBuf>,
+
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "启用系统字体作为回退（开启后优先级：用户字体 > 系统字体 > 项目内置字体）"
+    )]
+    pub system_fonts: bool,
+
     #[arg(long, short, default_value_t = 3, help = "弹幕滚动速度（像素每帧）")]
     pub speed: u32,
 
@@ -146,6 +160,15 @@ impl Args {
 
         if self.font_scale <= 0.0 {
             bail!("font_scale 必须大于 0，当前值: {}", self.font_scale);
+        }
+
+        for path in &self.font {
+            if !path.exists() {
+                bail!("字体文件不存在: {}", path.display());
+            }
+            if path.is_dir() {
+                bail!("不能输入目录（字体源）: {}", path.display());
+            }
         }
 
         if self.speed == 0 {
@@ -305,6 +328,8 @@ mod tests {
             top_ratio: 0.0,
             bottom_ratio: 1.0,
             font_scale: 1.0,
+            font: vec![],
+            system_fonts: false,
             speed: 3,
             line_spacing: 4,
             min_space: 20,
@@ -331,6 +356,8 @@ mod tests {
             top_ratio: 0.0,
             bottom_ratio: 1.0,
             font_scale: 1.0,
+            font: vec![],
+            system_fonts: false,
             speed: 3,
             line_spacing: 4,
             min_space: 20,
@@ -411,6 +438,38 @@ mod tests {
     }
 
     #[test]
+    fn test_clap_parse_repeatable_font_and_system_fonts() {
+        use clap::Parser;
+        let args = Args::try_parse_from([
+            "bili_add_on",
+            "--input", "v.mp4",
+            "--bvid", "BV1test",
+            "--font", "a.ttf",
+            "--font", "b.ttf",
+            "--system-fonts",
+        ]).unwrap();
+        assert_eq!(args.font.len(), 2);
+        assert_eq!(args.font[0].to_string_lossy(), "a.ttf");
+        assert_eq!(args.font[1].to_string_lossy(), "b.ttf");
+        assert!(args.system_fonts);
+    }
+
+    #[test]
+    fn test_check_rejects_missing_font_file() {
+        let tmp = std::env::temp_dir().join("bili_add_on_font_check.mp4");
+        std::fs::write(&tmp, b"fake").unwrap();
+        let mut args = default_args();
+        args.input = tmp.clone();
+        args.font = vec![PathBuf::from("definitely_missing_font.ttf")];
+        assert!(args.check().is_err());
+        args.font = vec![std::env::temp_dir()];
+        assert!(args.check().is_err()); // 目录不允许
+        args.font = vec![];
+        assert!(args.check().is_ok());
+        std::fs::remove_file(&tmp).unwrap();
+    }
+
+    #[test]
     fn test_check_bottom_must_be_greater_than_top() {
         let mut args = default_args();
         args.top_ratio = 0.5;
@@ -434,6 +493,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 特意用圆周率近似值验证小数解析
     fn test_parse_time_point_seconds() {
         assert!((parse_time_point("3.1415926").unwrap() - 3.1415926).abs() < 1e-9);
         assert!((parse_time_point("0").unwrap() - 0.0).abs() < 1e-9);
