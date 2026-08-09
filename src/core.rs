@@ -439,7 +439,8 @@ fn compute_max_danmaku_deadline(
     for dan in danmakus {
         let deadline_secs = match dan.mode {
             DanmakuMode::Scroll | DanmakuMode::Reverse => {
-                let (text_width, _) = fonts.text_size(&dan.text, (dan.font_size as f32) * args.font_scale);
+                let text_width =
+                    fonts.text_width(&dan.text, (dan.font_size as f32) * args.font_scale);
                 let travel_frames = (text_width + video_width).div_ceil(args.speed);
                 dan.time.as_secs_f64() + travel_frames as f64 * frame_duration_secs
             }
@@ -491,9 +492,7 @@ pub(crate) fn video_process(
 
     // 标准字号（25 × font_scale）参考墨迹高度：轨道基准间距 = 墨迹高度 + line_spacing，
     // 保证标准字号弹幕的相邻行视觉间隙恰为 line_spacing（轨道间无死区）。
-    let (sample_w, sample_h) = fonts.text_size("字", 25.0 * args.font_scale);
-    let mut sample_img = RgbaImage::new(sample_w, sample_h);
-    fonts.draw_text(&mut sample_img, "字", 25.0 * args.font_scale, Rgb([255, 255, 255]));
+    let sample_img = fonts.render_sprite("字", 25.0 * args.font_scale, Rgb([255, 255, 255]));
     let ink_ref = sprite_ink_bounds(&sample_img)
         .map(|(t, b)| b.saturating_sub(t))
         .unwrap_or(1)
@@ -580,10 +579,9 @@ pub(crate) fn video_process(
 
                     for d in enqueue {
                         let scale = (d.font_size as f32) * args.font_scale;
-                        let (width, height) = fonts.text_size(&d.text, scale);
                         let color = d.color;
-                        let mut cached_text = RgbaImage::new(width, height);
-                        fonts.draw_text(&mut cached_text, &d.text, scale, color);
+                        let cached_text = fonts.render_sprite(&d.text, scale, color);
+                        let width = cached_text.width();
                         // 虚拟轨道数：该字号墨迹高度需要几个基础轨道（B站虚拟轨道机制）
                         let n_rails = compute_n_rails(ink_ref, base_pitch, d.font_size);
                         let (travel, dead_line) = match d.mode {
