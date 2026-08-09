@@ -105,6 +105,7 @@ impl FfmpegEncoder {
         height: u32,
         frame_rate: f32,
         encoder_pref: EncoderPref,
+        x264_preset: &str,
     ) -> Result<Self> {
         let mut octx = ffmpeg::format::output(path)
             .with_context(|| format!("创建视频输出文件失败: {}", path.display()))?;
@@ -157,6 +158,7 @@ impl FfmpegEncoder {
                 height,
                 frame_rate,
                 global_header,
+                x264_preset,
             ) {
                 Ok((encoder, encoder_time_base, hw_setup)) => {
                     let mut ost = octx.add_stream(codec).context("添加视频流到输出文件失败")?;
@@ -224,6 +226,7 @@ impl FfmpegEncoder {
         height: u32,
         frame_rate: f32,
         global_header: bool,
+        x264_preset: &str,
     ) -> Result<(
         ffmpeg::encoder::Video,
         ffmpeg::Rational,
@@ -256,12 +259,17 @@ impl FfmpegEncoder {
             None
         };
 
-        let encoder = encoder.open().map_err(|e| {
-            anyhow!(
-                "打开 {} 编码器失败: {e:?}",
-                hw_codec.map_or("libx264", |c| c.encoder_name())
-            )
-        })?;
+        let encoder = if hw_codec.is_none() {
+            let mut x264_opts = ffmpeg::Dictionary::new();
+            x264_opts.set("preset", x264_preset);
+            encoder
+                .open_with(x264_opts)
+                .map_err(|e| anyhow!("打开 libx264 编码器失败: {e:?}"))?
+        } else {
+            encoder
+                .open()
+                .map_err(|e| anyhow!("打开 {} 编码器失败: {e:?}", hw_codec.unwrap().encoder_name()))?
+        };
         let encoder_time_base = encoder.time_base();
 
         Ok((encoder, encoder_time_base, hw_setup))
@@ -1052,6 +1060,7 @@ pub(crate) fn same_specifications(
     decoder: &VideoDecoder,
     path: impl AsRef<Path>,
     encoder_pref: EncoderPref,
+    x264_preset: &str,
 ) -> anyhow::Result<(FfmpegEncoder, f64)> {
     let path = path.as_ref();
 
@@ -1060,7 +1069,7 @@ pub(crate) fn same_specifications(
     if frame_rate <= 0.0 {
         return Err(anyhow!("视频帧率无效: {frame_rate}，无法确定每帧持续时间"));
     }
-    let encoder = FfmpegEncoder::new(path, width, height, frame_rate, encoder_pref)?;
+    let encoder = FfmpegEncoder::new(path, width, height, frame_rate, encoder_pref, x264_preset)?;
 
     let frame_duration_secs = 1.0 / frame_rate as f64;
 

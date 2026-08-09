@@ -48,6 +48,7 @@ bili_add_on --input input.mp4 --xml danmaku.xml
 | `--no-audio` | | `false` | 不保留输入视频的音频轨道（输出仅含画面） |
 | `--quiet` | `-q` | `false` | 静默模式，不输出进度提示 |
 | `--encoder` | | `auto` | 视频编码器，可选：`auto` / `nvenc` / `amf` / `qsv` / `software` |
+| `--x264-preset` | | `medium` | libx264 编码预设（仅软件编码生效）：`ultrafast` / `superfast` / `veryfast` / `faster` / `fast` / `medium` / `slow` / `slower` / `veryslow` |
 | `--longest` | | false | 自动延长视频来显示所有弹幕 |
 
 ### 硬件加速编码
@@ -63,6 +64,12 @@ bili_add_on --input input.mp4 --xml danmaku.xml
 | `software` | libx264（纯 CPU 软编码） | 全部 |
 
 若指定硬件编码器不可用，将自动回退到 `software`。
+
+软件编码使用 libx264，默认预设为 `medium`。追求编码速度时可用更快的预设（如 `veryfast`，编码速度通常可提升数倍，代价是压缩率略降）：
+
+```bash
+bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx --encoder software --x264-preset veryfast
+```
 
 ### 弹幕区域控制
 

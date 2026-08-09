@@ -142,7 +142,12 @@ fn run() -> anyhow::Result<()> {
         },
     };
 
-    let (encoder, frame_duration) = same_specifications(&decoder, &temp_path, encoder_pref)
+    let (encoder, frame_duration) = same_specifications(
+        &decoder,
+        &temp_path,
+        encoder_pref,
+        &args.x264_preset,
+    )
         .with_context(|| {
             format!(
                 "视频编码器创建失败，无法写入临时文件: {}",

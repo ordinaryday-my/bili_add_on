@@ -91,6 +91,13 @@ pub struct Args {
 
     #[arg(
         long,
+        default_value = "medium",
+        help = "libx264 编码预设（仅软件编码生效）: ultrafast/superfast/veryfast/faster/fast/medium/slow/slower/veryslow"
+    )]
+    pub x264_preset: String,
+
+    #[arg(
+        long,
         help = "若弹幕时间跨度大于视频时长，自动延长输出视频（末尾补黑帧）以完整显示全部弹幕"
     )]
     pub longest: bool,
@@ -181,6 +188,25 @@ impl Args {
                 "encoder 必须是 {} 之一，当前值: {}",
                 valid_encoders.join("/"),
                 self.encoder
+            );
+        }
+
+        let valid_presets = [
+            "ultrafast",
+            "superfast",
+            "veryfast",
+            "faster",
+            "fast",
+            "medium",
+            "slow",
+            "slower",
+            "veryslow",
+        ];
+        if !valid_presets.contains(&self.x264_preset.as_str()) {
+            bail!(
+                "x264_preset 必须是 {} 之一，当前值: {}",
+                valid_presets.join("/"),
+                self.x264_preset
             );
         }
 
@@ -337,6 +363,7 @@ mod tests {
             no_audio: false,
             quiet: false,
             encoder: "auto".to_string(),
+            x264_preset: "medium".to_string(),
             longest: false,
             filter: Some(vec![]),
             range: None,
@@ -365,6 +392,7 @@ mod tests {
             no_audio: false,
             quiet: false,
             encoder: "auto".to_string(),
+            x264_preset: "medium".to_string(),
             longest: false,
             filter: Some(vec![]),
             range: None,
@@ -418,6 +446,28 @@ mod tests {
         let mut args = default_args();
         args.encoder = "cuda".to_string();
         assert!(args.check().is_err());
+    }
+
+    #[test]
+    fn test_check_x264_preset() {
+        for preset in ["ultrafast", "veryfast", "fast", "medium", "slow", "veryslow"] {
+            let mut args = default_args();
+            args.x264_preset = preset.to_string();
+            assert!(args.check().is_err()); // 文件存在性检查先失败，预设本身有效
+        }
+        let mut args = default_args();
+        args.x264_preset = "invalid".to_string();
+        assert!(args.check().is_err());
+        // 预设校验在文件存在性之后，用一个存在的输入验证预设被接受
+        let tmp = std::env::temp_dir().join("bili_add_on_preset_check.mp4");
+        std::fs::write(&tmp, b"fake").unwrap();
+        let mut args = default_args();
+        args.input = tmp.clone();
+        args.x264_preset = "veryfast".to_string();
+        assert!(args.check().is_ok());
+        args.x264_preset = "bogus".to_string();
+        assert!(args.check().is_err());
+        std::fs::remove_file(&tmp).unwrap();
     }
 
     #[test]
