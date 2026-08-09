@@ -6,11 +6,12 @@ use clap::Parser;
 use mimalloc::MiMalloc;
 
 use crate::{
-    core::{same_specifications, video_process, EncoderPref},
+    core::video_process,
     danmaku::{
-        filter_danmakus, get_danmuku_xml_by_bili_id, get_danmuku_xml_from_file, parse_danmakus,
+        filter_danmakus, get_danmaku_xml_by_bili_id, get_danmaku_xml_from_file, parse_danmakus,
     },
     decoder::VideoDecoder,
+    encoder::{same_specifications, EncoderPref},
     interaction::Args,
 };
 
@@ -18,9 +19,11 @@ mod audio;
 mod core;
 mod danmaku;
 mod decoder;
+mod encoder;
 mod fonts;
 mod hw;
 mod interaction;
+mod layout;
 mod utils;
 mod web;
 
@@ -65,7 +68,7 @@ fn run() -> anyhow::Result<()> {
         .context("--range 参数解析失败")?;
 
     let xml = if let Some(id) = &args.source.bvid {
-        get_danmuku_xml_by_bili_id(id)
+        get_danmaku_xml_by_bili_id(id)
             .with_context(|| format!("获取B站弹幕数据失败 (bvid: {id})"))?
     } else {
         let file = args
@@ -73,7 +76,7 @@ fn run() -> anyhow::Result<()> {
             .xml
             .as_ref()
             .ok_or_else(|| anyhow!("弹幕来源为空，请通过 --bvid 或 --xml 指定弹幕来源"))?;
-        get_danmuku_xml_from_file(file)
+        get_danmaku_xml_from_file(file)
             .with_context(|| format!("读取本地弹幕文件失败: {}", file.display()))?
     };
     let danmakus =

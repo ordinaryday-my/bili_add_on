@@ -336,14 +336,14 @@ impl OpacityGradient {
     }
 }
 
-pub fn get_danmuku_xml_by_bili_id(id: &str) -> anyhow::Result<String> {
+pub fn get_danmaku_xml_by_bili_id(id: &str) -> anyhow::Result<String> {
     let cid = get_cid_from_api(id).with_context(|| format!("获取B站视频cid失败 (bvid: {id})"))?;
     let xml = get_danmaku_xml(cid).with_context(|| format!("获取弹幕xml失败 (cid: {cid})"))?;
 
     Ok(xml)
 }
 
-pub fn get_danmuku_xml_from_file(file: &Path) -> anyhow::Result<String> {
+pub fn get_danmaku_xml_from_file(file: &Path) -> anyhow::Result<String> {
     let bytes = fs::read(file).with_context(|| format!("读取弹幕文件失败: {}", file.display()))?;
     let xml = decode_bytes(bytes, "").context("解码弹幕文件编码失败")?;
     Ok(xml)
