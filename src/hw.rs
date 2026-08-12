@@ -1,6 +1,6 @@
 use std::ptr;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use ffmpeg::ffi;
 use ffmpeg_next as ffmpeg;
 

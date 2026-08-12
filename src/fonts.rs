@@ -1,9 +1,9 @@
 use std::{num::NonZeroUsize, path::PathBuf, sync::Arc};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use cosmic_text::{
-    fontdb, Attrs, Buffer, Color, Family, FontSystem, Metrics, PlatformFallback, Shaping,
-    SwashCache, Weight,
+    Attrs, Buffer, Color, Family, FontSystem, Metrics, PlatformFallback, Shaping, SwashCache,
+    Weight, fontdb,
 };
 use image::{Rgb, RgbaImage};
 use lru::LruCache;
@@ -125,10 +125,7 @@ impl FontStack {
         for font in PROJECT_FONTS {
             let ids = db.load_font_source(fontdb::Source::Binary(Arc::new(font.bytes.to_vec())));
             if ids.is_empty() {
-                bail!(
-                    "内置字体加载失败: {}，字体文件可能已损坏",
-                    font.name
-                );
+                bail!("内置字体加载失败: {}，字体文件可能已损坏", font.name);
             }
         }
 
@@ -210,12 +207,7 @@ impl FontStack {
     /// 渲染文本精灵（透明底、抗锯齿 alpha），经 LRU 缓存复用重复弹幕的绘制结果。
     ///
     /// 无墨迹（如纯空格）时返回空精灵且不写入缓存。
-    pub fn render_sprite(
-        &mut self,
-        text: &str,
-        font_size: f32,
-        color: Rgb<u8>,
-    ) -> RgbaImage {
+    pub fn render_sprite(&mut self, text: &str, font_size: f32, color: Rgb<u8>) -> RgbaImage {
         if text.is_empty() {
             return RgbaImage::new(0, 0);
         }
@@ -227,9 +219,7 @@ impl FontStack {
         // 周期性收紧 cosmic-text 的 shape 运行缓存（库本身无淘汰逻辑）
         self.render_count += 1;
         if self.render_count.is_multiple_of(SHAPE_CACHE_TRIM_INTERVAL) {
-            self.font_system
-                .shape_run_cache
-                .trim(SHAPE_CACHE_KEEP_AGES);
+            self.font_system.shape_run_cache.trim(SHAPE_CACHE_KEEP_AGES);
         }
 
         let mut buffer = self.shape(text, font_size);
@@ -333,7 +323,8 @@ fn load_user_font(
     primary_family: &mut Option<String>,
     primary_weight: &mut Weight,
 ) -> Result<()> {
-    let bytes = std::fs::read(path).with_context(|| format!("读取字体文件失败: {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("读取字体文件失败: {}", path.display()))?;
     let ids = db.load_font_source(fontdb::Source::Binary(Arc::new(bytes)));
     if ids.is_empty() {
         bail!("无法解析字体文件: {}", path.display());
@@ -387,7 +378,12 @@ mod tests {
     fn test_empty_text_zero_size() {
         let args = args_with(&[], false);
         let mut stack = FontStack::load(&args).unwrap();
-        assert_eq!(stack.render_sprite("", 25.0, Rgb([255, 255, 255])).dimensions(), (0, 0));
+        assert_eq!(
+            stack
+                .render_sprite("", 25.0, Rgb([255, 255, 255]))
+                .dimensions(),
+            (0, 0)
+        );
         assert_eq!(stack.text_width("", 25.0), 0);
     }
 

@@ -1,18 +1,12 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use image::Rgb;
 
 use bili_add_on::{fonts::FontStack, interaction::Args};
 use clap::Parser;
 
 fn stack() -> FontStack {
-    let args = Args::try_parse_from([
-        "bili_add_on",
-        "--input",
-        "bench.mp4",
-        "--bvid",
-        "BV1test",
-    ])
-    .unwrap();
+    let args =
+        Args::try_parse_from(["bili_add_on", "--input", "bench.mp4", "--bvid", "BV1test"]).unwrap();
     FontStack::load(&args).unwrap()
 }
 

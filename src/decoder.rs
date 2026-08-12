@@ -1,12 +1,12 @@
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ffmpeg::{
     codec::context::Context as AvContext,
     media::Type as MediaType,
@@ -260,7 +260,9 @@ impl VideoDecoder {
             let stop_at = max_deadline + step.max(self.extend_frame_duration);
             let next_ts = self.last_ts.map_or(0.0, |t| t + step);
             if next_ts < stop_at {
-                if let Some((_, end)) = self.range && next_ts >= end {
+                if let Some((_, end)) = self.range
+                    && next_ts >= end
+                {
                     return Ok(None);
                 }
                 self.last_ts = Some(next_ts);

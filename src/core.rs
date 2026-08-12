@@ -1,8 +1,8 @@
 use core::panic;
 use std::{
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -20,10 +20,10 @@ use crate::{
     i18n::Lang,
     interaction::Args,
     layout::{
-        compute_max_danmaku_deadline, compute_n_rails, del_dead, draw_fixed_danmakus,
-        draw_scroll_danmakus, scroll, Direction, DrawParams, NormalComponent,
+        Direction, DrawParams, NormalComponent, compute_max_danmaku_deadline, compute_n_rails,
+        del_dead, draw_fixed_danmakus, draw_scroll_danmakus, scroll,
     },
-    utils::{sprite_ink_bounds, GrowableVec, Ignore},
+    utils::{GrowableVec, Ignore, sprite_ink_bounds},
 };
 
 const PROGRESS_INTERVAL_MS: u64 = 100;
@@ -360,10 +360,7 @@ fn render_progress(current: u64, estimate: u64, exact_total: u64, lang: Lang) {
         estimate.max(current)
     };
     if total == 0 {
-        eprint!(
-            "\r{}",
-            lang.t_fmt("render_progress", current)
-        );
+        eprint!("\r{}", lang.t_fmt("render_progress", current));
     } else {
         let pct = (current as f64 / total as f64 * 100.0) as u32;
         let filled = ((BAR_WIDTH as f64 * current as f64 / total as f64) as usize).min(BAR_WIDTH);

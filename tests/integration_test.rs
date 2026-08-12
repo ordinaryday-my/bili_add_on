@@ -1,23 +1,35 @@
-use clap::Parser;
 use bili_add_on::interaction::Args;
+use clap::Parser;
 
 #[test]
 fn test_cli_full_args_parsing() {
     let args = Args::try_parse_from([
         "bili_add_on",
-        "--input", "video.mp4",
-        "--output", "out.mp4",
-        "--bvid", "BV1fRNH6kEra",
-        "--opacity", "0.5",
-        "--top-ratio", "0.1",
-        "--bottom-ratio", "0.9",
-        "--font-scale", "1.5",
-        "--speed", "5",
-        "--line-spacing", "3",
-        "--fixed-duration", "10.0",
-        "--encoder", "software",
+        "--input",
+        "video.mp4",
+        "--output",
+        "out.mp4",
+        "--bvid",
+        "BV1fRNH6kEra",
+        "--opacity",
+        "0.5",
+        "--top-ratio",
+        "0.1",
+        "--bottom-ratio",
+        "0.9",
+        "--font-scale",
+        "1.5",
+        "--speed",
+        "5",
+        "--line-spacing",
+        "3",
+        "--fixed-duration",
+        "10.0",
+        "--encoder",
+        "software",
         "--quiet",
-    ]).unwrap();
+    ])
+    .unwrap();
 
     assert_eq!(args.input.to_string_lossy(), "video.mp4");
     assert_eq!(args.output.unwrap().to_string_lossy(), "out.mp4");
@@ -37,11 +49,8 @@ fn test_cli_full_args_parsing() {
 
 #[test]
 fn test_cli_default_values() {
-    let args = Args::try_parse_from([
-        "bili_add_on",
-        "--input", "video.mp4",
-        "--bvid", "BV1test",
-    ]).unwrap();
+    let args =
+        Args::try_parse_from(["bili_add_on", "--input", "video.mp4", "--bvid", "BV1test"]).unwrap();
 
     assert!((args.opacity - 0.93).abs() < f64::EPSILON);
     assert!((args.top_ratio - 0.0).abs() < f64::EPSILON);
@@ -60,9 +69,12 @@ fn test_cli_default_values() {
 fn test_cli_xml_source() {
     let args = Args::try_parse_from([
         "bili_add_on",
-        "--input", "video.mp4",
-        "--xml", "danmaku.xml",
-    ]).unwrap();
+        "--input",
+        "video.mp4",
+        "--xml",
+        "danmaku.xml",
+    ])
+    .unwrap();
 
     assert_eq!(args.source.xml.unwrap().to_string_lossy(), "danmaku.xml");
     assert!(args.source.bvid.is_none());
@@ -73,10 +85,14 @@ fn test_cli_encoder_options() {
     for enc in &["auto", "nvenc", "amf", "qsv", "software"] {
         let args = Args::try_parse_from([
             "bili_add_on",
-            "--input", "v.mp4",
-            "--bvid", "BV1test",
-            "--encoder", enc,
-        ]).unwrap();
+            "--input",
+            "v.mp4",
+            "--bvid",
+            "BV1test",
+            "--encoder",
+            enc,
+        ])
+        .unwrap();
         assert_eq!(args.encoder, *enc);
     }
 }
@@ -85,9 +101,12 @@ fn test_cli_encoder_options() {
 fn test_check_output_path_generation() {
     let mut args = Args::try_parse_from([
         "bili_add_on",
-        "--input", "/home/user/videos/test_video.mp4",
-        "--bvid", "BV1test",
-    ]).unwrap();
+        "--input",
+        "/home/user/videos/test_video.mp4",
+        "--bvid",
+        "BV1test",
+    ])
+    .unwrap();
 
     args.check_output().unwrap();
     let out = args.output.unwrap();
@@ -99,19 +118,13 @@ fn test_check_output_path_generation() {
 
 #[test]
 fn test_cli_parse_fails_missing_source() {
-    let args = Args::try_parse_from([
-        "bili_add_on",
-        "--input", "video.mp4",
-    ]);
+    let args = Args::try_parse_from(["bili_add_on", "--input", "video.mp4"]);
     assert!(args.is_err());
 }
 
 #[test]
 fn test_cli_parse_fails_missing_input() {
-    let args = Args::try_parse_from([
-        "bili_add_on",
-        "--bvid", "BV1test",
-    ]);
+    let args = Args::try_parse_from(["bili_add_on", "--bvid", "BV1test"]);
     assert!(args.is_err());
 }
 
@@ -134,11 +147,7 @@ fn test_danmaku_xml_format_compatibility() {
     <d p="3.77400,6,25,16711680,1738389259,0,0193b302,115610329733865984">{}</d>
     <d p="7.41500,9,25,13684944,1738389260,0,0102df42,115610320960305664">{}</d>
 </i>"#,
-        "普通滚动弹幕",
-        "底部弹幕",
-        "顶部弹幕",
-        "逆向弹幕",
-        "BAS弹幕",
+        "普通滚动弹幕", "底部弹幕", "顶部弹幕", "逆向弹幕", "BAS弹幕",
     );
 
     let danmakus = bili_add_on::danmaku::parse_danmakus(xml).unwrap();

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::utils::decode_bytes;
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 
 pub fn get_cid_from_api(bvid: &str) -> anyhow::Result<u64> {
     let url = format!("https://api.bilibili.com/x/web-interface/view?bvid={bvid}");
@@ -108,8 +108,8 @@ mod tests {
 
     #[test]
     fn test_maybe_decompress_zlib() {
-        use flate2::write::ZlibEncoder;
         use flate2::Compression;
+        use flate2::write::ZlibEncoder;
         use std::io::Write;
 
         let original = b"<i><d p=\"1.0,1,25,16777215\">hello</d></i>";
@@ -123,8 +123,8 @@ mod tests {
 
     #[test]
     fn test_maybe_decompress_raw_deflate() {
-        use flate2::write::DeflateEncoder;
         use flate2::Compression;
+        use flate2::write::DeflateEncoder;
         use std::io::Write;
 
         let original = b"<i><d>test</d></i>";

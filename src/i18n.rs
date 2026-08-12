@@ -10,11 +10,7 @@ pub enum Lang {
 /// 双语条目表：(键, 中文, 英文)。
 const BILINGUAL: &[(&str, &str, &str)] = &[
     // ---- 运行时消息 ----
-    (
-        "parsed_danmakus",
-        "已解析 {} 条弹幕",
-        "Parsed {} danmakus",
-    ),
+    ("parsed_danmakus", "已解析 {} 条弹幕", "Parsed {} danmakus"),
     ("filtered_out", "滤过 {} 个", "Filtered out {}"),
     ("codec_ready", "编解码器已就绪", "Codecs ready"),
     (
@@ -52,7 +48,11 @@ const BILINGUAL: &[(&str, &str, &str)] = &[
         "B站视频 ID（如 BV1fRNH6kEra），将自动拉取对应弹幕",
         "Bilibili video ID (e.g. BV1fRNH6kEra); danmaku is fetched automatically",
     ),
-    ("xml", "本地弹幕 XML 文件路径", "Path to a local danmaku XML file"),
+    (
+        "xml",
+        "本地弹幕 XML 文件路径",
+        "Path to a local danmaku XML file",
+    ),
     (
         "opacity",
         "弹幕不透明度，取值范围 0~1",
@@ -84,7 +84,11 @@ const BILINGUAL: &[(&str, &str, &str)] = &[
         "弹幕滚动速度（像素每帧）",
         "Danmaku scroll speed (pixels per frame)",
     ),
-    ("line_spacing", "弹幕行间距（像素）", "Danmaku line spacing (pixels)"),
+    (
+        "line_spacing",
+        "弹幕行间距（像素）",
+        "Danmaku line spacing (pixels)",
+    ),
     (
         "min_space",
         "同一轨道内前后滚动弹幕的最小水平间距（像素），与字号无关",

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use regex::Regex;
 use std::{cmp::Ordering, ffi::OsString, path::PathBuf};
@@ -132,9 +132,7 @@ impl Args {
         Self::parse_with_locale_from(std::env::args())
     }
 
-    fn parse_with_locale_from(
-        argv: impl IntoIterator<Item = String>,
-    ) -> Result<(Args, Lang)> {
+    fn parse_with_locale_from(argv: impl IntoIterator<Item = String>) -> Result<(Args, Lang)> {
         let argv: Vec<String> = argv.into_iter().collect();
         let lang = Lang::detect(lang_arg_from(&argv).as_deref());
         let mut cmd = Args::command();
@@ -499,7 +497,14 @@ mod tests {
 
     #[test]
     fn test_check_x264_preset() {
-        for preset in ["ultrafast", "veryfast", "fast", "medium", "slow", "veryslow"] {
+        for preset in [
+            "ultrafast",
+            "veryfast",
+            "fast",
+            "medium",
+            "slow",
+            "veryslow",
+        ] {
             let mut args = default_args();
             args.x264_preset = preset.to_string();
             assert!(args.check().is_err()); // 文件存在性检查先失败，预设本身有效
@@ -541,12 +546,17 @@ mod tests {
         use clap::Parser;
         let args = Args::try_parse_from([
             "bili_add_on",
-            "--input", "v.mp4",
-            "--bvid", "BV1test",
-            "--font", "a.ttf",
-            "--font", "b.ttf",
+            "--input",
+            "v.mp4",
+            "--bvid",
+            "BV1test",
+            "--font",
+            "a.ttf",
+            "--font",
+            "b.ttf",
             "--system-fonts",
-        ]).unwrap();
+        ])
+        .unwrap();
         assert_eq!(args.font.len(), 2);
         assert_eq!(args.font[0].to_string_lossy(), "a.ttf");
         assert_eq!(args.font[1].to_string_lossy(), "b.ttf");
@@ -559,25 +569,38 @@ mod tests {
         for lang in ["zh", "en", "auto"] {
             let args = Args::try_parse_from([
                 "bili_add_on",
-                "--input", "v.mp4",
-                "--bvid", "BV1test",
-                "--lang", lang,
-            ]).unwrap();
+                "--input",
+                "v.mp4",
+                "--bvid",
+                "BV1test",
+                "--lang",
+                lang,
+            ])
+            .unwrap();
             assert_eq!(args.lang, lang);
         }
         let args = Args::try_parse_from([
             "bili_add_on",
-            "--input", "v.mp4",
-            "--bvid", "BV1test",
+            "--input",
+            "v.mp4",
+            "--bvid",
+            "BV1test",
             "--lang=zh",
-        ]).unwrap();
+        ])
+        .unwrap();
         assert_eq!(args.lang, "zh");
-        assert!(Args::try_parse_from([
-            "bili_add_on",
-            "--input", "v.mp4",
-            "--bvid", "BV1test",
-            "--lang", "fr",
-        ]).is_err());
+        assert!(
+            Args::try_parse_from([
+                "bili_add_on",
+                "--input",
+                "v.mp4",
+                "--bvid",
+                "BV1test",
+                "--lang",
+                "fr",
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -585,9 +608,12 @@ mod tests {
         let (args, lang) = Args::parse_with_locale_from(
             [
                 "bili_add_on",
-                "--input", "v.mp4",
-                "--bvid", "BV1test",
-                "--lang", "en",
+                "--input",
+                "v.mp4",
+                "--bvid",
+                "BV1test",
+                "--lang",
+                "en",
             ]
             .into_iter()
             .map(String::from),
@@ -598,9 +624,12 @@ mod tests {
         let (_, lang) = Args::parse_with_locale_from(
             [
                 "bili_add_on",
-                "--input", "v.mp4",
-                "--bvid", "BV1test",
-                "--lang", "zh",
+                "--input",
+                "v.mp4",
+                "--bvid",
+                "BV1test",
+                "--lang",
+                "zh",
             ]
             .into_iter()
             .map(String::from),

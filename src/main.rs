@@ -1,6 +1,6 @@
 use std::{fs, process::exit, time::Instant};
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{Context, anyhow, bail};
 #[cfg(not(feature = "dhat-heap"))]
 use mimalloc::MiMalloc;
 
@@ -10,7 +10,7 @@ use crate::{
         filter_danmakus, get_danmaku_xml_by_bili_id, get_danmaku_xml_from_file, parse_danmakus,
     },
     decoder::VideoDecoder,
-    encoder::{same_specifications, EncoderPref},
+    encoder::{EncoderPref, same_specifications},
     interaction::Args,
 };
 
@@ -145,24 +145,29 @@ fn run() -> anyhow::Result<()> {
         },
     };
 
-    let (encoder, frame_duration) = same_specifications(
-        &decoder,
-        &temp_path,
-        encoder_pref,
-        &args.x264_preset,
-    )
-        .with_context(|| {
-            format!(
-                "视频编码器创建失败，无法写入临时文件: {}",
-                temp_path.display()
-            )
-        })?;
+    let (encoder, frame_duration) =
+        same_specifications(&decoder, &temp_path, encoder_pref, &args.x264_preset).with_context(
+            || {
+                format!(
+                    "视频编码器创建失败，无法写入临时文件: {}",
+                    temp_path.display()
+                )
+            },
+        )?;
 
     if !args.quiet {
         eprintln!("{}", lang.t("rendering"));
     }
-    video_process(decoder, encoder, danmakus, &args, frame_duration, range, lang)
-        .context("视频处理流程失败（弹幕渲染到视频帧时出错）")?;
+    video_process(
+        decoder,
+        encoder,
+        danmakus,
+        &args,
+        frame_duration,
+        range,
+        lang,
+    )
+    .context("视频处理流程失败（弹幕渲染到视频帧时出错）")?;
 
     if args.no_audio || !audio::has_audio(&args.input).unwrap_or(false) {
         fs::rename(&*temp_path, &output_path).with_context(|| {
@@ -184,7 +189,10 @@ fn run() -> anyhow::Result<()> {
         eprintln!("{}", lang.t_fmt("output_file", output_path.display()));
         eprintln!(
             "{}",
-            lang.t_fmt("done_in", format!("{:.1}", (Instant::now() - start_time).as_secs_f32()))
+            lang.t_fmt(
+                "done_in",
+                format!("{:.1}", (Instant::now() - start_time).as_secs_f32())
+            )
         );
     }
     Ok(())

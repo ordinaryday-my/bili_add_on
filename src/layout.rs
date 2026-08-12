@@ -7,7 +7,7 @@ use crate::{
     danmaku::{Danmaku, DanmakuMode},
     fonts::FontStack,
     interaction::Args,
-    utils::{blit_cached_text, GrowableVec},
+    utils::{GrowableVec, blit_cached_text},
 };
 
 /// 计算最长弹幕的完全显示截止时间（供 --longest 扩展视频时长）。
@@ -177,10 +177,7 @@ pub(crate) fn draw_fixed_danmakus(
     }
 }
 
-pub(crate) fn del_dead(
-    slots: &mut GrowableVec<Option<(Danmaku, NormalComponent)>>,
-    dur: Duration,
-) {
+pub(crate) fn del_dead(slots: &mut GrowableVec<Option<(Danmaku, NormalComponent)>>, dur: Duration) {
     for opt in slots.iter_mut() {
         let Some((_, comp)) = &opt else {
             continue;
@@ -312,8 +309,8 @@ pub(crate) struct NormalComponent {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::Direction::ToLeft;
+    use super::*;
     use image::Rgb;
 
     #[test]

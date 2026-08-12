@@ -1,6 +1,10 @@
-use std::{path::Path, thread, time::{Duration, Instant}};
+use std::{
+    path::Path,
+    thread,
+    time::{Duration, Instant},
+};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use image::RgbImage;
 
 use ffmpeg_next as ffmpeg;
@@ -247,9 +251,12 @@ impl FfmpegEncoder {
                 .open_with(x264_opts)
                 .map_err(|e| anyhow!("打开 libx264 编码器失败: {e:?}"))?
         } else {
-            encoder
-                .open()
-                .map_err(|e| anyhow!("打开 {} 编码器失败: {e:?}", hw_codec.unwrap().encoder_name()))?
+            encoder.open().map_err(|e| {
+                anyhow!(
+                    "打开 {} 编码器失败: {e:?}",
+                    hw_codec.unwrap().encoder_name()
+                )
+            })?
         };
         let encoder_time_base = encoder.time_base();
 

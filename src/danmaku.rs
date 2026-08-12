@@ -1,11 +1,11 @@
 use std::{borrow::Cow, fs, path::Path, time::Duration};
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use image::Rgb;
 use quick_xml::{
-    escape::unescape,
-    events::{attributes::Attribute, Event},
     XmlVersion,
+    escape::unescape,
+    events::{Event, attributes::Attribute},
 };
 use regex::Regex;
 
