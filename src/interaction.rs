@@ -419,7 +419,7 @@ mod tests {
     #[test]
     fn test_check_output_generates_default_path() {
         let mut args = Args {
-            input: PathBuf::from("C:\\videos\\my_video.mp4"),
+            input: PathBuf::from("videos").join("my_video.mp4"),
             output: None,
             source: DanmakuSource {
                 bvid: Some("BV1test".to_string()),

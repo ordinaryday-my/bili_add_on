@@ -11,7 +11,7 @@ runs:
         sudo apt-get update
         sudo apt-get install -y \
           libavcodec-dev libavformat-dev libavutil-dev \
-          libswscale-dev libswresample-dev \
+          libswscale-dev libswresample-dev libavfilter-dev libavdevice-dev \
           pkg-config clang
 
     - name: Install FFmpeg (macOS)
@@ -24,8 +24,9 @@ runs:
       if: runner.os == 'Windows'
       shell: pwsh
       run: |
+        # ffmpeg-next 8.1 仅兼容 ffmpeg 7.x；master 构建（8.x）头文件不兼容
         $zip = "$env:RUNNER_TEMP\ffmpeg-win64.zip"
-        Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl-shared.zip" -OutFile $zip
+        Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-n7.1-latest-win64-gpl-shared-7.1.zip" -OutFile $zip
         Expand-Archive -LiteralPath $zip -DestinationPath "$env:RUNNER_TEMP\ffmpeg"
         $dir = Get-ChildItem -LiteralPath "$env:RUNNER_TEMP\ffmpeg" -Directory | Select-Object -First 1
         Write-Output "FFMPEG_DIR=$($dir.FullName)" >> $env:GITHUB_ENV
