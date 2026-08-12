@@ -31,8 +31,27 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      - name: Check disk space
+        run: df -h .
+
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --all-targets -- -D warnings --message-format=short 2>&1 | tee clippy.log
 
       - name: Run tests
-        run: cargo test --lib --bins --tests
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --lib --bins --tests 2>&1 | tee tests.log
+
+      - name: Upload failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-logs-${{ matrix.os }}
+          path: |
+            clippy.log
+            tests.log
+          if-no-files-found: ignore
