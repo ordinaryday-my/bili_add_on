@@ -1,0 +1,32 @@
+name: Setup FFmpeg dev libraries
+description: Install FFmpeg development libraries required to link ffmpeg-sys-next
+
+runs:
+  using: composite
+  steps:
+    - name: Install FFmpeg (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libavcodec-dev libavformat-dev libavutil-dev \
+          libswscale-dev libswresample-dev \
+          pkg-config clang
+
+    - name: Install FFmpeg (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        brew install pkg-config ffmpeg
+
+    - name: Install FFmpeg (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $zip = "$env:RUNNER_TEMP\ffmpeg-win64.zip"
+        Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl-shared.zip" -OutFile $zip
+        Expand-Archive -LiteralPath $zip -DestinationPath "$env:RUNNER_TEMP\ffmpeg"
+        $dir = Get-ChildItem -LiteralPath "$env:RUNNER_TEMP\ffmpeg" -Directory | Select-Object -First 1
+        Write-Output "FFMPEG_DIR=$($dir.FullName)" >> $env:GITHUB_ENV
+        Write-Output "$($dir.FullName)\bin" >> $env:GITHUB_PATH
