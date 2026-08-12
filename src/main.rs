@@ -1,7 +1,6 @@
 use std::{fs, process::exit, time::Instant};
 
 use anyhow::{anyhow, bail, Context};
-use clap::Parser;
 #[cfg(not(feature = "dhat-heap"))]
 use mimalloc::MiMalloc;
 
@@ -22,6 +21,7 @@ mod decoder;
 mod encoder;
 mod fonts;
 mod hw;
+mod i18n;
 mod interaction;
 mod layout;
 mod utils;
@@ -48,7 +48,7 @@ fn main() {
 
 fn run() -> anyhow::Result<()> {
     let start_time = Instant::now();
-    let mut args = Args::parse();
+    let (mut args, lang) = Args::parse_with_locale()?;
     args.check()
         .context("参数校验失败，请检查输入参数是否正确")?;
     args.check_output()
@@ -82,13 +82,13 @@ fn run() -> anyhow::Result<()> {
     let danmakus =
         parse_danmakus(xml).context("解析弹幕XML失败，请检查弹幕文件格式是否符合B站XML规范")?;
     if !args.quiet {
-        eprintln!("已解析 {} 条弹幕", danmakus.len());
+        eprintln!("{}", lang.t_fmt("parsed_danmakus", danmakus.len()));
     }
 
     let danmakus = if let Some(filters) = filters {
         let original_len = danmakus.len();
         let after = filter_danmakus(danmakus, &filters);
-        eprintln!("滤过 {} 个", original_len - after.len());
+        eprintln!("{}", lang.t_fmt("filtered_out", original_len - after.len()));
         after
     } else {
         danmakus
@@ -106,7 +106,7 @@ fn run() -> anyhow::Result<()> {
         ffmpeg_next::ffi::av_log_set_level(ffmpeg_next::ffi::AV_LOG_INFO);
     }
     if !args.quiet {
-        eprintln!("编解码器已就绪");
+        eprintln!("{}", lang.t("codec_ready"));
     }
 
     let output_path = args.output.clone().unwrap();
@@ -159,9 +159,9 @@ fn run() -> anyhow::Result<()> {
         })?;
 
     if !args.quiet {
-        eprintln!("正在渲染弹幕到视频帧...");
+        eprintln!("{}", lang.t("rendering"));
     }
-    video_process(decoder, encoder, danmakus, &args, frame_duration, range)
+    video_process(decoder, encoder, danmakus, &args, frame_duration, range, lang)
         .context("视频处理流程失败（弹幕渲染到视频帧时出错）")?;
 
     if args.no_audio || !audio::has_audio(&args.input).unwrap_or(false) {
@@ -174,17 +174,17 @@ fn run() -> anyhow::Result<()> {
         })?;
     } else {
         if !args.quiet {
-            eprintln!("正在合并音频轨道...");
+            eprintln!("{}", lang.t("merging_audio"));
         }
         audio::remux_audio_range(&temp_path, &args.input, &output_path, range)
             .context("音频混流失败")?;
     }
 
     if !args.quiet {
-        eprintln!("输出文件: {}", output_path.display());
+        eprintln!("{}", lang.t_fmt("output_file", output_path.display()));
         eprintln!(
-            "完成，总用时 {:.1}s",
-            (Instant::now() - start_time).as_secs_f32()
+            "{}",
+            lang.t_fmt("done_in", format!("{:.1}", (Instant::now() - start_time).as_secs_f32()))
         );
     }
     Ok(())

@@ -1,7 +1,9 @@
 use anyhow::{anyhow, bail, Context, Result};
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use regex::Regex;
 use std::{cmp::Ordering, ffi::OsString, path::PathBuf};
+
+use crate::i18n::Lang;
 
 #[derive(Debug, Parser)]
 #[command(version, author, about)]
@@ -111,9 +113,40 @@ pub struct Args {
         help = "视频处理时段：{起始}-{结束} 或 {结束}；时间格式为 时:分:秒 / 分:秒 / 秒，如 1:23-5:00、162:12、3.1415926"
     )]
     pub range: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "LANG",
+        default_value = "auto",
+        value_parser = ["zh", "en", "auto"],
+        help = "输出语言：zh/en/auto（auto 按系统区域设置）/ Output language: zh/en/auto (auto follows system locale)"
+    )]
+    pub lang: String,
 }
 
 impl Args {
+    /// 解析命令行参数并按 `--lang`/系统区域本地化帮助文本。
+    ///
+    /// 返回 `(参数, 语言)`；`--help` 时由 clap 以本地化文本输出并退出。
+    pub fn parse_with_locale() -> Result<(Args, Lang)> {
+        Self::parse_with_locale_from(std::env::args())
+    }
+
+    fn parse_with_locale_from(
+        argv: impl IntoIterator<Item = String>,
+    ) -> Result<(Args, Lang)> {
+        let argv: Vec<String> = argv.into_iter().collect();
+        let lang = Lang::detect(lang_arg_from(&argv).as_deref());
+        let mut cmd = Args::command();
+        cmd = cmd.about(lang.t("about"));
+        cmd = cmd.mut_args(|arg| match lang.arg_help(arg.get_id().as_str()) {
+            Some(en) => arg.help(Some(en)),
+            None => arg,
+        });
+        let matches = cmd.get_matches_from(argv);
+        let args = Args::from_arg_matches(&matches).map_err(|e| anyhow!("{e}"))?;
+        Ok((args, lang))
+    }
     pub fn check(&self) -> anyhow::Result<()> {
         if !self.input.exists() {
             bail!("视频源不存在: {}", self.input.display());
@@ -256,6 +289,20 @@ impl Args {
     }
 }
 
+/// 从原始命令行参数中提取 `--lang` 值（在 clap 完整解析前用于帮助文本本地化）。
+fn lang_arg_from(argv: &[String]) -> Option<String> {
+    let mut iter = argv.iter().skip(1);
+    while let Some(arg) = iter.next() {
+        if let Some(value) = arg.strip_prefix("--lang=") {
+            return Some(value.to_string());
+        }
+        if arg == "--lang" {
+            return iter.next().cloned();
+        }
+    }
+    None
+}
+
 /// 解析单个时间点：`时:分:秒` / `分:秒` / `秒`。
 ///
 /// 时、分必须为非负整数，秒必须为非负浮点数（拒绝 NaN/Infinity/负数）。
@@ -367,6 +414,7 @@ mod tests {
             longest: false,
             filter: Some(vec![]),
             range: None,
+            lang: "auto".to_string(),
         }
     }
 
@@ -396,6 +444,7 @@ mod tests {
             longest: false,
             filter: Some(vec![]),
             range: None,
+            lang: "auto".to_string(),
         };
 
         args.check_output().unwrap();
@@ -502,6 +551,62 @@ mod tests {
         assert_eq!(args.font[0].to_string_lossy(), "a.ttf");
         assert_eq!(args.font[1].to_string_lossy(), "b.ttf");
         assert!(args.system_fonts);
+    }
+
+    #[test]
+    fn test_clap_parse_lang() {
+        use clap::Parser;
+        for lang in ["zh", "en", "auto"] {
+            let args = Args::try_parse_from([
+                "bili_add_on",
+                "--input", "v.mp4",
+                "--bvid", "BV1test",
+                "--lang", lang,
+            ]).unwrap();
+            assert_eq!(args.lang, lang);
+        }
+        let args = Args::try_parse_from([
+            "bili_add_on",
+            "--input", "v.mp4",
+            "--bvid", "BV1test",
+            "--lang=zh",
+        ]).unwrap();
+        assert_eq!(args.lang, "zh");
+        assert!(Args::try_parse_from([
+            "bili_add_on",
+            "--input", "v.mp4",
+            "--bvid", "BV1test",
+            "--lang", "fr",
+        ]).is_err());
+    }
+
+    #[test]
+    fn test_parse_with_locale_returns_lang() {
+        let (args, lang) = Args::parse_with_locale_from(
+            [
+                "bili_add_on",
+                "--input", "v.mp4",
+                "--bvid", "BV1test",
+                "--lang", "en",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(args.input.to_string_lossy(), "v.mp4");
+        assert_eq!(lang, crate::i18n::Lang::En);
+        let (_, lang) = Args::parse_with_locale_from(
+            [
+                "bili_add_on",
+                "--input", "v.mp4",
+                "--bvid", "BV1test",
+                "--lang", "zh",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .unwrap();
+        assert_eq!(lang, crate::i18n::Lang::Zh);
     }
 
     #[test]

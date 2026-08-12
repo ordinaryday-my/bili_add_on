@@ -1,5 +1,7 @@
 # bili_add_on
 
+[English](README.en.md) | 中文
+
 为视频叠加 B 站弹幕（danmaku）的命令行工具。支持从 B 站视频 ID 自动获取弹幕 XML，也支持指定本地弹幕 XML 文件。
 
 ## 依赖
@@ -50,6 +52,7 @@ bili_add_on --input input.mp4 --xml danmaku.xml
 | `--encoder` | | `auto` | 视频编码器，可选：`auto` / `nvenc` / `amf` / `qsv` / `software` |
 | `--x264-preset` | | `medium` | libx264 编码预设（仅软件编码生效）：`ultrafast` / `superfast` / `veryfast` / `faster` / `fast` / `medium` / `slow` / `slower` / `veryslow` |
 | `--longest` | | false | 自动延长视频来显示所有弹幕 |
+| `--lang` | | `auto` | 输出语言：`zh` / `en` / `auto`（auto 按系统区域设置） |
 
 ### 硬件加速编码
 

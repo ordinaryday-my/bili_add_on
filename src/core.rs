@@ -17,6 +17,7 @@ use crate::{
     decoder::VideoDecoder,
     encoder::FfmpegEncoder,
     fonts::FontStack,
+    i18n::Lang,
     interaction::Args,
     layout::{
         compute_max_danmaku_deadline, compute_n_rails, del_dead, draw_fixed_danmakus,
@@ -34,6 +35,7 @@ pub(crate) fn video_process(
     args: &Args,
     frame_duration_secs: f64,
     range: Option<(f64, f64)>,
+    lang: Lang,
 ) -> Result<()> {
     if let Some((start, end)) = range {
         decoder.set_range(start, end);
@@ -278,7 +280,7 @@ pub(crate) fn video_process(
                         if is_final
                             || now - last_progress >= Duration::from_millis(PROGRESS_INTERVAL_MS)
                         {
-                            render_progress(frame_count, total_frames, exact);
+                            render_progress(frame_count, total_frames, exact, lang);
                             last_progress = now;
                             if is_final {
                                 final_shown = true;
@@ -291,7 +293,7 @@ pub(crate) fn video_process(
                 // 补打一次确保进度条走到 100%
                 if !args.quiet && !final_shown {
                     let exact = total_reporter.load(Ordering::Relaxed);
-                    render_progress(frame_count, total_frames, exact);
+                    render_progress(frame_count, total_frames, exact, lang);
                     if exact == 0 || frame_count < exact {
                         // 异常路径：收尾行未带换行，补一个避免后续输出粘连
                         eprintln!();
@@ -349,7 +351,7 @@ pub(crate) fn video_process(
     Ok(())
 }
 
-fn render_progress(current: u64, estimate: u64, exact_total: u64) {
+fn render_progress(current: u64, estimate: u64, exact_total: u64, lang: Lang) {
     const BAR_WIDTH: usize = 30;
 
     let total = if exact_total > 0 {
@@ -358,7 +360,10 @@ fn render_progress(current: u64, estimate: u64, exact_total: u64) {
         estimate.max(current)
     };
     if total == 0 {
-        eprint!("\r正在渲染弹幕... 已处理 {current} 帧");
+        eprint!(
+            "\r{}",
+            lang.t_fmt("render_progress", current)
+        );
     } else {
         let pct = (current as f64 / total as f64 * 100.0) as u32;
         let filled = ((BAR_WIDTH as f64 * current as f64 / total as f64) as usize).min(BAR_WIDTH);
