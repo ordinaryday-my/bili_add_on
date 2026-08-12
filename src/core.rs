@@ -120,10 +120,7 @@ pub(crate) fn video_process(
         let decode_producer = thread::Builder::new()
             .name("decode".to_string())
             .spawn_scoped(s, move || -> Result<()> {
-                loop {
-                    let Ok(mut image) = recycle_r.recv() else {
-                        break;
-                    };
+                while let Ok(mut image) = recycle_r.recv() {
                     let ts_secs = match decoder.next_frame_into(&mut image)? {
                         Some(ts) => ts,
                         None => break,
@@ -143,10 +140,7 @@ pub(crate) fn video_process(
                 let mut last_progress =
                     Instant::now() - Duration::from_millis(PROGRESS_INTERVAL_MS);
                 let mut final_shown = false;
-                loop {
-                    let Ok((ts_secs, dur, mut image)) = decode_r.recv() else {
-                        break;
-                    };
+                while let Ok((ts_secs, dur, mut image)) = decode_r.recv() {
                     let ready_idx = danmakus.partition_point(|dan| dan.time > dur);
                     let enqueue = danmakus.drain(ready_idx..).rev();
 

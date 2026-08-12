@@ -123,13 +123,9 @@ pub(crate) fn draw_fixed_danmakus(
         }
 
         let raw_occupieds = fixed_slots.iter().filter_map(|opt| {
-            opt.as_ref().map(|(_, c)| c).and_then(|comp| {
-                if comp.y.is_some() {
-                    Some((comp.y.unwrap(), comp.n_rails))
-                } else {
-                    None
-                }
-            })
+            opt.as_ref()
+                .map(|(_, c)| c)
+                .and_then(|comp| comp.y.map(|y| (y, comp.n_rails)))
         });
 
         for (y, n_rails) in raw_occupieds {
@@ -236,13 +232,9 @@ pub(crate) fn draw_scroll_danmakus(
         }
 
         let raw_occupieds = scroll_slots.iter().filter_map(|opt| {
-            opt.as_ref().map(|(_, c)| c).and_then(|comp| {
-                if comp.y.is_some() {
-                    Some((comp.width, comp.x, comp.y.unwrap(), comp.n_rails))
-                } else {
-                    None
-                }
-            })
+            opt.as_ref()
+                .map(|(_, c)| c)
+                .and_then(|comp| comp.y.map(|y| (comp.width, comp.x, y, comp.n_rails)))
         });
 
         for (width, x, y, n_rails) in raw_occupieds {
