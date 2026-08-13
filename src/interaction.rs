@@ -13,6 +13,8 @@ use crate::i18n::Lang;
 pub const STDIN: &str = ":STDIN:";
 /// `--output` 特殊值：将视频写入标准输出。
 pub const STDOUT: &str = ":STDOUT:";
+/// `--input` 特殊值：从采集设备（摄像头、屏幕捕获等）实时输入。
+pub const DEVICE: &str = ":DEVICE:";
 
 #[derive(Debug, Parser)]
 #[command(version, author, about)]
@@ -20,7 +22,7 @@ pub struct Args {
     #[arg(
         long,
         short,
-        help = "输入视频文件路径，或 :STDIN: 从标准输入读取"
+        help = "输入视频文件路径，或 :STDIN: 从标准输入读取，或 :DEVICE: 从采集设备输入（配合 --capture）"
     )]
     pub input: String,
 
@@ -143,6 +145,13 @@ pub struct Args {
 
     #[arg(
         long,
+        value_name = "SPEC",
+        help = "采集设备规格：{格式}:{URL}，如 dshow:video=USB Camera、gdigrab:desktop、v4l2:/dev/video0、avfoundation:0:none；或直接写 desktop/screen 使用平台默认屏幕捕获（仅 --input :DEVICE: 时有效）"
+    )]
+    pub capture: Option<String>,
+
+    #[arg(
+        long,
         value_name = "LANG",
         default_value = "auto",
         value_parser = ["zh", "en", "auto"],
@@ -173,7 +182,7 @@ impl Args {
         Ok((args, lang))
     }
     pub fn check(&self) -> anyhow::Result<()> {
-        if self.input != STDIN {
+        if !self.is_special_input() {
             if !Path::new(&self.input).exists() {
                 bail!("视频源不存在: {}", self.input);
             }
@@ -306,13 +315,40 @@ impl Args {
             }
         }
 
+        if self.input == DEVICE {
+            let Some(capture) = &self.capture else {
+                bail!("使用 :DEVICE: 输入时必须指定 --capture（如 dshow:video=USB Camera、gdigrab:desktop）");
+            };
+            if let Some((_, url)) = capture.split_once(':')
+                && url.is_empty()
+            {
+                bail!("--capture 规格无效: '{capture}'（{{格式}}:{{URL}} 中 URL 不能为空）");
+            }
+            let Some(range) = &self.range else {
+                bail!("采集设备输入必须指定 --range（采集源没有尽头，需用结束时间确定时长，如 --range 30）");
+            };
+            if range.contains('-') {
+                bail!("采集设备输入不支持 --range 起始时间，请只写结束时间（如 --range 30）");
+            }
+        } else if self.capture.is_some() {
+            bail!("--capture 仅在使用 --input :DEVICE: 时有效");
+        }
+
         Ok(())
+    }
+
+    /// 输入是否为特殊值（stdin / 采集设备），此时不检查文件存在性。
+    fn is_special_input(&self) -> bool {
+        self.input == STDIN || self.input == DEVICE
     }
 
     pub fn check_output(&mut self) -> anyhow::Result<()> {
         if self.output.is_none() {
             if self.input == STDIN {
                 bail!("使用 stdin 输入时必须显式指定 --output（文件路径或 :STDOUT:）");
+            }
+            if self.input == DEVICE {
+                bail!("使用采集设备输入时必须显式指定 --output（文件路径或 :STDOUT:）");
             }
             let mut from = PathBuf::from(&self.input);
             let mut prefix = OsString::from("bili_add_on_");
@@ -466,6 +502,7 @@ mod tests {
             range: None,
             audio: None,
             audio_range: None,
+            capture: None,
             lang: "auto".to_string(),
         }
     }
@@ -498,6 +535,7 @@ mod tests {
             range: None,
             audio: None,
             audio_range: None,
+            capture: None,
             lang: "auto".to_string(),
         };
 
@@ -884,5 +922,67 @@ mod tests {
         assert!(args.check().is_ok());
         args.audio_range = Some("10-5".to_string());
         assert!(args.check().is_err());
+    }
+
+    #[test]
+    fn test_check_device_requires_capture_and_range() {
+        let mut args = default_args();
+        args.input = DEVICE.to_string();
+        assert!(args.check().is_err()); // 缺少 --capture
+
+        args.capture = Some("gdigrab:desktop".to_string());
+        assert!(args.check().is_err()); // 缺少 --range
+
+        args.range = Some("30".to_string());
+        assert!(args.check().is_ok());
+
+        args.range = Some("1:23".to_string());
+        assert!(args.check().is_ok());
+
+        args.range = Some("5-30".to_string());
+        assert!(args.check().is_err()); // 不允许起始时间
+
+        args.range = Some("30".to_string());
+        args.capture = Some("gdigrab:".to_string());
+        assert!(args.check().is_err()); // URL 为空
+    }
+
+    #[test]
+    fn test_check_capture_requires_device_input() {
+        let mut args = default_args();
+        args.capture = Some("gdigrab:desktop".to_string());
+        assert!(args.check().is_err());
+    }
+
+    #[test]
+    fn test_clap_parse_device() {
+        use clap::Parser;
+        let args = Args::try_parse_from([
+            "bili_add_on",
+            "--input",
+            DEVICE,
+            "--output",
+            "out.mp4",
+            "--capture",
+            "dshow:video=USB Camera",
+            "--range",
+            "30",
+            "--bvid",
+            "BV1test",
+        ])
+        .unwrap();
+        assert_eq!(args.input, DEVICE);
+        assert_eq!(args.capture.as_deref(), Some("dshow:video=USB Camera"));
+        assert_eq!(args.range.as_deref(), Some("30"));
+    }
+
+    #[test]
+    fn test_check_output_requires_explicit_output_for_device() {
+        let mut args = default_args();
+        args.input = DEVICE.to_string();
+        args.output = None;
+        assert!(args.check_output().is_err());
+        args.output = Some("out.mp4".to_string());
+        assert!(args.check_output().is_ok());
     }
 }

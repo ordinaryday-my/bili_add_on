@@ -61,6 +61,33 @@ Limitations and notes:
 - With stdin input, `--output` is required (no default filename can be generated).
 - Output to stdout is written after processing completes (temp file first), not streamed incrementally.
 
+### Capture device input (camera / screen capture)
+
+`--input :DEVICE:` captures from a device in real time. Use `--capture` to specify the device spec (`{format}:{URL}`, matching ffmpeg CLI's `-f {format} -i {URL}`):
+
+```bash
+# Windows: camera (dshow)
+bili_add_on --input :DEVICE: --capture "dshow:video=USB Camera" \
+    --output out.mp4 --bvid BV1xxxxxxxxxx --range 30
+
+# Screen capture on Windows / Linux / macOS
+bili_add_on --input :DEVICE: --capture gdigrab:desktop --output out.mp4 --xml danmaku.xml --range 30
+bili_add_on --input :DEVICE: --capture x11grab::0.0   --output out.mp4 --xml danmaku.xml --range 30
+bili_add_on --input :DEVICE: --capture "avfoundation:1:none" --output out.mp4 --xml danmaku.xml --range 30
+
+# A bare desktop/screen uses the platform default screen capture
+# (Windows→gdigrab, Linux→x11grab, macOS→avfoundation)
+bili_add_on --input :DEVICE: --capture desktop --output out.mp4 --xml danmaku.xml --range 30
+```
+
+Limitations and notes:
+
+- A capture source has no end, so `--range` is **required** and **end-only** (e.g. `--range 30`, `--range 1:23`); a start time (`5-30`) is rejected.
+- Camera/mic audio cannot be remuxed from a capture device (the live stream cannot be re-read); a warning is printed and the output is video-only. Pass `--audio` to supply an external audio file.
+- The first frame's timestamp is normalized to 0 so the danmaku timeline aligns with the capture start.
+- The frame rate is determined by the device; if unavailable, 25 fps is assumed.
+- The FFmpeg build must include the required capture format (dshow / gdigrab / v4l2 / x11grab / avfoundation).
+
 ### External audio source and audio trimming
 
 `--audio` overrides the video's built-in audio with an external file; `--audio-range` first trims the audio on the audio-source timeline, aligns the trimmed start with the video start, then cuts it together with the video by `--range`:
@@ -85,8 +112,9 @@ ffmpeg -i input.mp4 -c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1 \
 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
-| `--input` | `-i` | **required** | Input video file path, or `:STDIN:` to read from stdin |
+| `--input` | `-i` | **required** | Input video file path, or `:STDIN:` to read from stdin, or `:DEVICE:` to capture from a device (with `--capture`) |
 | `--output` | `-o` | `bili_add_on_<source name>` | Output video path, or `:STDOUT:` to write to stdout |
+| `--capture` | | | Capture device spec: `{format}:{URL}`, e.g. `dshow:video=USB Camera`, `gdigrab:desktop`, `v4l2:/dev/video0`, `avfoundation:0:none`; or a bare `desktop`/`screen` for the platform default screen capture (only with `--input :DEVICE:`) |
 | `--bvid` | | | Bilibili video ID (e.g. `BV1xxxxxxxxxx`), danmaku is fetched automatically |
 | `--xml` | `-x` | | Path to a local danmaku XML file |
 | `--audio` | | | Path to an audio source file, overriding the video's built-in audio (useful with stdin input) |

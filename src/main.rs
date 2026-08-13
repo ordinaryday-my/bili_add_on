@@ -8,6 +8,7 @@ use std::{
 use anyhow::{Context, anyhow, bail};
 #[cfg(not(feature = "dhat-heap"))]
 use mimalloc::MiMalloc;
+use ffmpeg_next as ffmpeg;
 
 use crate::{
     core::video_process,
@@ -16,7 +17,7 @@ use crate::{
     },
     decoder::VideoDecoder,
     encoder::{EncoderPref, same_specifications},
-    interaction::{Args, STDIN, STDOUT},
+    interaction::{Args, DEVICE, STDIN, STDOUT},
 };
 
 mod audio;
@@ -122,10 +123,14 @@ fn run() -> anyhow::Result<()> {
     }
 
     let input_is_stdin = args.input == STDIN;
-    let input_url = if input_is_stdin {
-        "pipe:0".to_string()
+    let input_is_device = args.input == DEVICE;
+    let (input_url, input_format): (String, Option<String>) = if input_is_device {
+        let (url, fmt) = device_input_spec(args.capture.as_deref().unwrap())?;
+        (url, Some(fmt))
+    } else if input_is_stdin {
+        ("pipe:0".to_string(), None)
     } else {
-        args.input.clone()
+        (args.input.clone(), None)
     };
 
     let output_path: Option<PathBuf> = match args.output.as_deref() {
@@ -151,10 +156,23 @@ fn run() -> anyhow::Result<()> {
         .context("无法在输出目录创建临时文件")?;
     let temp_path = temp_file.into_temp_path();
 
-    let decoder = VideoDecoder::new(Path::new(&input_url)).with_context(|| {
+    let decoder = VideoDecoder::new_with_format(
+        Path::new(&input_url),
+        input_format.as_deref(),
+        ffmpeg::Dictionary::new(),
+        input_is_device.then_some(25.0),
+        input_is_device,
+    )
+    .with_context(|| {
         format!(
             "视频解码器创建失败，无法解码源: {}",
-            if input_is_stdin { "stdin (pipe:0)" } else { &args.input }
+            if input_is_device {
+                args.capture.as_deref().unwrap_or_default()
+            } else if input_is_stdin {
+                "stdin (pipe:0)"
+            } else {
+                &args.input
+            }
         )
     })?;
 
@@ -166,8 +184,9 @@ fn run() -> anyhow::Result<()> {
             if start >= video_duration {
                 bail!("--range 起始时间 ({start} 秒) 超出视频时长 ({video_duration:.3} 秒)");
             }
-        } else if !args.quiet {
+        } else if !args.quiet && !input_is_device {
             // 管道/流式输入（如 stdin）或部分容器无法预知时长，跳过校验。
+            // 采集设备输入 --range 强制且必填结束时间，无需提示。
             eprintln!("{}", lang.t("range_unknown_duration"));
         }
     }
@@ -205,7 +224,7 @@ fn run() -> anyhow::Result<()> {
     )
     .context("视频处理流程失败（弹幕渲染到视频帧时出错）")?;
 
-    // 音频源解析：--audio 指定文件 > 视频自带音频（文件输入）> 无（stdin 输入时警告）
+    // 音频源解析：--audio 指定文件 > 视频自带音频（文件输入）> 无（stdin/采集设备输入时警告）
     let audio_source: Option<PathBuf> = if args.no_audio {
         None
     } else if let Some(p) = &args.audio {
@@ -215,7 +234,10 @@ fn run() -> anyhow::Result<()> {
             bail!("音频源文件中没有音频流: {}", p.display());
         }
         Some(p.clone())
-    } else if !input_is_stdin && audio::has_audio(Path::new(&args.input)).unwrap_or(false) {
+    } else if !input_is_stdin
+        && !input_is_device
+        && audio::has_audio(Path::new(&args.input)).unwrap_or(false)
+    {
         Some(PathBuf::from(&args.input))
     } else {
         None
@@ -224,6 +246,8 @@ fn run() -> anyhow::Result<()> {
     if audio_source.is_none() && !args.no_audio && !args.quiet {
         if input_is_stdin {
             eprintln!("{}", lang.t("stdin_audio_skipped"));
+        } else if input_is_device {
+            eprintln!("{}", lang.t("device_audio_skipped"));
         } else if args.audio_range.is_some() {
             eprintln!("{}", lang.t("audio_range_ignored"));
         }
@@ -301,4 +325,38 @@ fn stream_to_stdout(path: &Path) -> anyhow::Result<()> {
     let mut stdout = io::stdout().lock();
     io::copy(&mut file, &mut stdout).context("写入标准输出失败")?;
     Ok(())
+}
+
+/// 解析 `--capture` 规格为 `(URL, 输入格式名)`。
+///
+/// `{格式}:{URL}` 直接解析（如 `dshow:video=USB Camera`、`gdigrab:desktop`）；
+/// 裸名 `desktop`/`screen` 按平台映射默认屏幕捕获，其他裸名按平台映射默认摄像头。
+fn device_input_spec(spec: &str) -> anyhow::Result<(String, String)> {
+    if let Some((fmt, url)) = spec.split_once(':') {
+        if fmt.is_empty() || url.is_empty() {
+            bail!(
+                "--capture 规格无效: '{spec}'（应为 {{格式}}:{{URL}}，如 dshow:video=USB Camera）"
+            );
+        }
+        return Ok((url.to_string(), fmt.to_string()));
+    }
+    let os = std::env::consts::OS;
+    match spec {
+        "desktop" | "screen" => Ok(match os {
+            "windows" => ("desktop".to_string(), "gdigrab".to_string()),
+            "linux" => (":0.0".to_string(), "x11grab".to_string()),
+            "macos" => ("1:none".to_string(), "avfoundation".to_string()),
+            _ => bail!(
+                "当前平台 ({os}) 不支持默认屏幕捕获，请显式指定 --capture {{格式}}:{{URL}}"
+            ),
+        }),
+        name => Ok(match os {
+            "windows" => (format!("video={name}"), "dshow".to_string()),
+            "linux" => (name.to_string(), "v4l2".to_string()),
+            "macos" => (name.to_string(), "avfoundation".to_string()),
+            _ => bail!(
+                "当前平台 ({os}) 不支持默认摄像头捕获，请显式指定 --capture {{格式}}:{{URL}}"
+            ),
+        }),
+    }
 }

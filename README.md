@@ -61,6 +61,32 @@ ffmpeg -i input.mp4 -c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1 \
 - 使用 stdin 输入时 `--output` 不可省略（无法自动生成默认文件名）。
 - 输出到 stdout 时先写入临时文件再整体输出，并非边处理边输出。
 
+### 采集设备输入（摄像头 / 屏幕捕获）
+
+`--input :DEVICE:` 从采集设备实时输入，需用 `--capture` 指定设备规格（`{格式}:{URL}`，与 ffmpeg CLI 的 `-f {格式} -i {URL}` 对应）：
+
+```bash
+# Windows：摄像头（dshow）
+bili_add_on --input :DEVICE: --capture "dshow:video=USB Camera" \
+    --output out.mp4 --bvid BV1xxxxxxxxxx --range 30
+
+# Windows / Linux / macOS：屏幕捕获
+bili_add_on --input :DEVICE: --capture gdigrab:desktop --output out.mp4 --xml danmaku.xml --range 30
+bili_add_on --input :DEVICE: --capture x11grab::0.0   --output out.mp4 --xml danmaku.xml --range 30
+bili_add_on --input :DEVICE: --capture "avfoundation:1:none" --output out.mp4 --xml danmaku.xml --range 30
+
+# 裸名 desktop/screen 使用平台默认屏幕捕获（Windows→gdigrab、Linux→x11grab、macOS→avfoundation）
+bili_add_on --input :DEVICE: --capture desktop --output out.mp4 --xml danmaku.xml --range 30
+```
+
+限制与注意事项：
+
+- 采集源没有尽头，`--range` **必填**且**只能写结束时间**（如 `--range 30`、`--range 1:23`），不允许起始时间（`5-30` 会报错）。
+- 摄像头/麦克风音频无法从采集设备混流（实时流无法二次读取），会打印警告并输出纯视频；可用 `--audio` 指定外部音频文件。
+- 首帧时间戳自动归一化为 0，弹幕时间轴与采集起点对齐。
+- 采集设备输入的帧率通常由设备决定；无法获取时按 25 fps 处理。
+- 需要 ffmpeg 编译包含对应采集格式（dshow / gdigrab / v4l2 / x11grab / avfoundation）。
+
 ### 外部音频源与音频裁剪
 
 `--audio` 使用外部音频文件覆盖视频自带音频；`--audio-range` 先按音频源时间轴裁剪，裁剪后的开头与视频开头对齐，随后与视频一起按 `--range` 裁剪：
@@ -84,8 +110,9 @@ ffmpeg -i input.mp4 -c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1 \
 
 | 参数 | 简写 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--input` | `-i` | **必填** | 输入视频文件路径，或 `:STDIN:` 从标准输入读取 |
+| `--input` | `-i` | **必填** | 输入视频文件路径，或 `:STDIN:` 从标准输入读取，或 `:DEVICE:` 从采集设备输入（配合 `--capture`） |
 | `--output` | `-o` | `bili_add_on_<源文件名>` | 输出视频路径，或 `:STDOUT:` 输出到标准输出 |
+| `--capture` | | | 采集设备规格：`{格式}:{URL}`，如 `dshow:video=USB Camera`、`gdigrab:desktop`、`v4l2:/dev/video0`、`avfoundation:0:none`；或直接写 `desktop`/`screen` 使用平台默认屏幕捕获（仅 `--input :DEVICE:` 时有效） |
 | `--bvid` | | | B 站视频 ID（如 `BV1xxxxxxxxxx`），自动拉取弹幕 |
 | `--xml` | `-x` | | 本地弹幕 XML 文件路径 |
 | `--audio` | | | 音频源文件路径，覆盖视频自带音频（stdin 输入时可用此参数保留音频） |

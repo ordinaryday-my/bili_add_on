@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use ffmpeg::{
     codec::context::Context as AvContext,
     media::Type as MediaType,
@@ -37,12 +37,44 @@ pub struct VideoDecoder {
     range: Option<(f64, f64)>,
     seeked: bool,
     seekable: bool,
+    normalize_start: bool,
+    base_ts: Option<f64>,
 }
 
 impl VideoDecoder {
-    pub fn new(path: &Path) -> Result<Self> {
-        let input = ffmpeg::format::input(path)
-            .with_context(|| format!("无法打开视频文件: {}", path.display()))?;
+    /// 以可选输入格式提示、选项字典、帧率兜底与时间线归一化创建解码器。
+    ///
+    /// - `format`: 输入格式名（如 `dshow`、`gdigrab`），用于采集设备等无法探测的输入；
+    ///   `None` 时按路径探测（与 `new` 一致）
+    /// - `options`: 传递给输入格式的选项字典
+    /// - `fps_fallback`: 帧率无法从流信息推断时的兜底值（部分采集设备不报帧率）
+    /// - `normalize_start`: 将首帧时间戳归一化为 0（用于 PTS 不从 0 起的实时输入）
+    pub fn new_with_format(
+        path: &Path,
+        format: Option<&str>,
+        options: ffmpeg::Dictionary,
+        fps_fallback: Option<f32>,
+        normalize_start: bool,
+    ) -> Result<Self> {
+        let input = match format {
+            Some(name) => {
+                let c_name = std::ffi::CString::new(name)
+                    .map_err(|_| anyhow!("输入格式名包含非法字符: {name}"))?;
+                let fmt_ptr = unsafe { ffmpeg::ffi::av_find_input_format(c_name.as_ptr()) };
+                if fmt_ptr.is_null() {
+                    bail!("找不到输入格式: {name}（请确认 ffmpeg 编译包含该格式）");
+                }
+                let input_fmt = unsafe { ffmpeg::format::format::Input::wrap(fmt_ptr as *mut _) };
+                match ffmpeg::format::open_with(path, &ffmpeg::Format::Input(input_fmt), options)
+                    .with_context(|| format!("无法打开采集设备: {}", path.display()))?
+                {
+                    ffmpeg::format::Context::Input(i) => i,
+                    _ => unreachable!(),
+                }
+            }
+            None => ffmpeg::format::input(path)
+                .with_context(|| format!("无法打开视频文件: {}", path.display()))?,
+        };
 
         let stream = input
             .streams()
@@ -84,6 +116,10 @@ impl VideoDecoder {
                 if avg.denominator() > 0 {
                     fr = avg.numerator() as f32 / avg.denominator() as f32;
                 }
+            }
+            // 采集设备等实时输入可能仍无帧率信息，使用调用方兜底值。
+            if fr <= 0.0 {
+                fr = fps_fallback.unwrap_or(0.0);
             }
             fr
         };
@@ -143,6 +179,8 @@ impl VideoDecoder {
             range: None,
             seeked: false,
             seekable,
+            normalize_start,
+            base_ts: None,
         })
     }
 
@@ -224,13 +262,20 @@ impl VideoDecoder {
                         .run(&decoded, &mut rgb)
                         .context("解码帧 RGB 转换失败")?;
 
-                    let ts_secs = decoded
+                    let mut ts_secs = decoded
                         .pts()
                         .map(|pts| {
                             pts as f64 * self.stream_time_base.numerator() as f64
                                 / self.stream_time_base.denominator() as f64
                         })
                         .unwrap_or(0.0);
+
+                    // 实时输入（采集设备）的 PTS 可能不从 0 起，
+                    // 将首帧时间戳归一化为 0，保证 --range 结束判断与弹幕时间轴对齐。
+                    if self.normalize_start {
+                        let base = *self.base_ts.get_or_insert(ts_secs);
+                        ts_secs -= base;
+                    }
 
                     if let Some((start, end)) = range {
                         if ts_secs < start {

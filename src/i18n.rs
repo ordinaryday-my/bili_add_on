@@ -41,6 +41,11 @@ const BILINGUAL: &[(&str, &str, &str)] = &[
         "Audio cannot be remuxed from stdin input; audio skipped (pass --audio to provide an audio file)",
     ),
     (
+        "device_audio_skipped",
+        "采集设备输入无法混流音频，已跳过音频（可通过 --audio 指定音频文件）",
+        "Audio cannot be remuxed from a capture device; audio skipped (pass --audio to provide an audio file)",
+    ),
+    (
         "audio_range_ignored",
         "未找到可用的音频源，--audio-range 被忽略",
         "No audio source available; --audio-range ignored",
@@ -59,13 +64,18 @@ const BILINGUAL: &[(&str, &str, &str)] = &[
     // ---- CLI 参数帮助 ----
     (
         "input",
-        "输入视频文件路径，或 :STDIN: 从标准输入读取",
-        "Input video file path, or :STDIN: to read from stdin",
+        "输入视频文件路径，或 :STDIN: 从标准输入读取，或 :DEVICE: 从采集设备输入（配合 --capture）",
+        "Input video file path, or :STDIN: to read from stdin, or :DEVICE: to capture from a device (with --capture)",
     ),
     (
         "output",
         "输出视频路径，或 :STDOUT: 输出到标准输出（默认在源文件名前添加 bili_add_on_ 前缀）",
         "Output video path, or :STDOUT: to write to stdout (defaults to bili_add_on_<source name>)",
+    ),
+    (
+        "capture",
+        "采集设备规格：{格式}:{URL}，如 dshow:video=USB Camera、gdigrab:desktop、v4l2:/dev/video0、avfoundation:0:none；或直接写 desktop/screen 使用平台默认屏幕捕获（仅 --input :DEVICE: 时有效）",
+        "Capture device spec: {format}:{URL}, e.g. dshow:video=USB Camera, gdigrab:desktop, v4l2:/dev/video0, avfoundation:0:none; or a bare desktop/screen for the platform default screen capture (only with --input :DEVICE:)",
     ),
     (
         "audio",

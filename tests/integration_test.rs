@@ -136,6 +136,27 @@ fn test_cli_stdin_stdout_special_values() {
 }
 
 #[test]
+fn test_cli_device_input() {
+    let args = Args::try_parse_from([
+        "bili_add_on",
+        "--input",
+        bili_add_on::interaction::DEVICE,
+        "--output",
+        "out.mp4",
+        "--capture",
+        "gdigrab:desktop",
+        "--range",
+        "30",
+        "--bvid",
+        "BV1test",
+    ])
+    .unwrap();
+    assert_eq!(args.input, bili_add_on::interaction::DEVICE);
+    assert_eq!(args.capture.as_deref(), Some("gdigrab:desktop"));
+    assert_eq!(args.range.as_deref(), Some("30"));
+}
+
+#[test]
 fn test_cli_parse_fails_missing_source() {
     let args = Args::try_parse_from(["bili_add_on", "--input", "video.mp4"]);
     assert!(args.is_err());
