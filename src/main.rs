@@ -17,7 +17,7 @@ use crate::{
     },
     decoder::VideoDecoder,
     encoder::{EncoderPref, same_specifications},
-    interaction::{Args, DEVICE, STDIN, STDOUT},
+    interaction::{Cli, Commands, RenderOptions, STDIN, STDOUT, parse_time_range},
 };
 
 mod audio;
@@ -53,38 +53,124 @@ fn main() {
 }
 
 fn run() -> anyhow::Result<()> {
-    let start_time = Instant::now();
-    let (mut args, lang) = Args::parse_with_locale()?;
-    args.check()
-        .context("参数校验失败，请检查输入参数是否正确")?;
-    args.check_output()
-        .context("生成默认输出路径失败（源文件名无效，无法自动拼接输出文件名）")?;
-    let args = args;
+    let (cli, lang) = Cli::parse_with_locale()?;
+    match cli.command {
+        Commands::ListDevices(args) => {
+            decoder::list_devices(&args.format)?;
+            Ok(())
+        }
+        Commands::Overlay(mut args) => {
+            args.check()
+                .context("参数校验失败，请检查输入参数是否正确")?;
+            args.check_output()
+                .context("生成默认输出路径失败（源文件名无效，无法自动拼接输出文件名）")?;
+            let spec = if args.input == STDIN {
+                InputSpec::Stdin
+            } else {
+                InputSpec::File(args.input.clone())
+            };
+            run_render(
+                &spec,
+                args.output.as_deref(),
+                args.range.as_deref(),
+                &args.render,
+                lang,
+            )
+        }
+        Commands::Capture(args) => {
+            args.check()
+                .context("参数校验失败，请检查输入参数是否正确")?;
+            let (url, format) = device_input_spec(&args.capture)?;
+            run_render(
+                &InputSpec::Device { url, format },
+                Some(&args.output),
+                Some(&args.range),
+                &args.render,
+                lang,
+            )
+        }
+    }
+}
 
-    let filters = args
+/// 渲染输入源：本地文件 / 标准输入 / 采集设备。
+enum InputSpec {
+    File(String),
+    Stdin,
+    Device { url: String, format: String },
+}
+
+impl InputSpec {
+    fn input_url(&self) -> &str {
+        match self {
+            InputSpec::Stdin => "pipe:0",
+            InputSpec::File(path) => path,
+            InputSpec::Device { url, .. } => url,
+        }
+    }
+
+    fn input_format(&self) -> Option<&str> {
+        match self {
+            InputSpec::Device { format, .. } => Some(format),
+            _ => None,
+        }
+    }
+
+    fn display(&self) -> String {
+        match self {
+            InputSpec::Stdin => "stdin (pipe:0)".to_string(),
+            InputSpec::File(path) => path.clone(),
+            InputSpec::Device { url, format } => format!("{format}:{url}"),
+        }
+    }
+
+    fn is_stdin(&self) -> bool {
+        matches!(self, InputSpec::Stdin)
+    }
+
+    fn is_device(&self) -> bool {
+        matches!(self, InputSpec::Device { .. })
+    }
+
+    /// 可再次打开以混流自带音频的输入（仅普通文件）。
+    fn file_path(&self) -> Option<&str> {
+        match self {
+            InputSpec::File(path) => Some(path),
+            _ => None,
+        }
+    }
+}
+
+fn run_render(
+    spec: &InputSpec,
+    output: Option<&str>,
+    range: Option<&str>,
+    render: &RenderOptions,
+    lang: crate::i18n::Lang,
+) -> anyhow::Result<()> {
+    let start_time = Instant::now();
+
+    let filters = render
         .parse_filters()
         .transpose()
         .context("--filter参数转换失败")?;
 
-    let range = args
-        .range
-        .as_deref()
-        .map(interaction::parse_time_range)
+    let range = range
+        .map(parse_time_range)
         .transpose()
         .context("--range 参数解析失败")?;
 
-    let audio_range = args
+    let audio_range = render
         .audio_range
         .as_deref()
-        .map(interaction::parse_time_range)
+        .map(parse_time_range)
         .transpose()
         .context("--audio-range 参数解析失败")?;
 
-    let xml = if let Some(id) = &args.source.bvid {
+    let xml = if let Some(id) = &render.source.bvid {
         get_danmaku_xml_by_bili_id(id)
             .with_context(|| format!("获取B站弹幕数据失败 (bvid: {id})"))?
     } else {
-        let file = args
+        let file = render
             .source
             .xml
             .as_ref()
@@ -94,7 +180,7 @@ fn run() -> anyhow::Result<()> {
     };
     let danmakus =
         parse_danmakus(xml).context("解析弹幕XML失败，请检查弹幕文件格式是否符合B站XML规范")?;
-    if !args.quiet {
+    if !render.quiet {
         eprintln!("{}", lang.t_fmt("parsed_danmakus", danmakus.len()));
     }
 
@@ -118,22 +204,11 @@ fn run() -> anyhow::Result<()> {
     unsafe {
         ffmpeg_next::ffi::av_log_set_level(ffmpeg_next::ffi::AV_LOG_INFO);
     }
-    if !args.quiet {
+    if !render.quiet {
         eprintln!("{}", lang.t("codec_ready"));
     }
 
-    let input_is_stdin = args.input == STDIN;
-    let input_is_device = args.input == DEVICE;
-    let (input_url, input_format): (String, Option<String>) = if input_is_device {
-        let (url, fmt) = device_input_spec(args.capture.as_deref().unwrap())?;
-        (url, Some(fmt))
-    } else if input_is_stdin {
-        ("pipe:0".to_string(), None)
-    } else {
-        (args.input.clone(), None)
-    };
-
-    let output_path: Option<PathBuf> = match args.output.as_deref() {
+    let output_path: Option<PathBuf> = match output {
         Some(STDOUT) => None,
         Some(dest) => Some(PathBuf::from(dest)),
         None => unreachable!("check_output 已保证输出路径存在"),
@@ -156,25 +231,24 @@ fn run() -> anyhow::Result<()> {
         .context("无法在输出目录创建临时文件")?;
     let temp_path = temp_file.into_temp_path();
 
-    let decoder = VideoDecoder::new_with_format(
-        Path::new(&input_url),
-        input_format.as_deref(),
+    let decoder = match VideoDecoder::new_with_format(
+        Path::new(spec.input_url()),
+        spec.input_format(),
         ffmpeg::Dictionary::new(),
-        input_is_device.then_some(25.0),
-        input_is_device,
-    )
-    .with_context(|| {
-        format!(
-            "视频解码器创建失败，无法解码源: {}",
-            if input_is_device {
-                args.capture.as_deref().unwrap_or_default()
-            } else if input_is_stdin {
-                "stdin (pipe:0)"
-            } else {
-                &args.input
+        spec.is_device().then_some(25.0),
+        spec.is_device(),
+    ) {
+        Ok(decoder) => decoder,
+        Err(e) => {
+            // 采集设备打开失败时打印设备列表辅助排查。
+            if let Some(fmt) = spec.input_format() {
+                let _ = decoder::list_devices(fmt);
             }
-        )
-    })?;
+            return Err(e).with_context(|| {
+                format!("视频解码器创建失败，无法解码源: {}", spec.display())
+            });
+        }
+    };
 
     if let Some((start, _)) = range {
         let frame_count = decoder.frame_count();
@@ -184,14 +258,14 @@ fn run() -> anyhow::Result<()> {
             if start >= video_duration {
                 bail!("--range 起始时间 ({start} 秒) 超出视频时长 ({video_duration:.3} 秒)");
             }
-        } else if !args.quiet && !input_is_device {
+        } else if !render.quiet && !spec.is_device() {
             // 管道/流式输入（如 stdin）或部分容器无法预知时长，跳过校验。
             // 采集设备输入 --range 强制且必填结束时间，无需提示。
             eprintln!("{}", lang.t("range_unknown_duration"));
         }
     }
 
-    let encoder_pref = match args.encoder.as_str() {
+    let encoder_pref = match render.encoder.as_str() {
         "auto" => EncoderPref::Auto,
         "software" => EncoderPref::Software,
         name => match hw::HwCodec::from_cli(name) {
@@ -201,7 +275,7 @@ fn run() -> anyhow::Result<()> {
     };
 
     let (encoder, frame_duration) =
-        same_specifications(&decoder, &temp_path, encoder_pref, &args.x264_preset).with_context(
+        same_specifications(&decoder, &temp_path, encoder_pref, &render.x264_preset).with_context(
             || {
                 format!(
                     "视频编码器创建失败，无法写入临时文件: {}",
@@ -210,14 +284,14 @@ fn run() -> anyhow::Result<()> {
             },
         )?;
 
-    if !args.quiet {
+    if !render.quiet {
         eprintln!("{}", lang.t("rendering"));
     }
     video_process(
         decoder,
         encoder,
         danmakus,
-        &args,
+        render,
         frame_duration,
         range,
         lang,
@@ -225,30 +299,29 @@ fn run() -> anyhow::Result<()> {
     .context("视频处理流程失败（弹幕渲染到视频帧时出错）")?;
 
     // 音频源解析：--audio 指定文件 > 视频自带音频（文件输入）> 无（stdin/采集设备输入时警告）
-    let audio_source: Option<PathBuf> = if args.no_audio {
+    let audio_source: Option<PathBuf> = if render.no_audio {
         None
-    } else if let Some(p) = &args.audio {
+    } else if let Some(p) = &render.audio {
         if !audio::has_audio(p)
             .with_context(|| format!("无法检测音频源文件: {}", p.display()))?
         {
             bail!("音频源文件中没有音频流: {}", p.display());
         }
         Some(p.clone())
-    } else if !input_is_stdin
-        && !input_is_device
-        && audio::has_audio(Path::new(&args.input)).unwrap_or(false)
+    } else if let Some(path) = spec.file_path()
+        && audio::has_audio(Path::new(path)).unwrap_or(false)
     {
-        Some(PathBuf::from(&args.input))
+        Some(PathBuf::from(path))
     } else {
         None
     };
 
-    if audio_source.is_none() && !args.no_audio && !args.quiet {
-        if input_is_stdin {
+    if audio_source.is_none() && !render.no_audio && !render.quiet {
+        if spec.is_stdin() {
             eprintln!("{}", lang.t("stdin_audio_skipped"));
-        } else if input_is_device {
+        } else if spec.is_device() {
             eprintln!("{}", lang.t("device_audio_skipped"));
-        } else if args.audio_range.is_some() {
+        } else if render.audio_range.is_some() {
             eprintln!("{}", lang.t("audio_range_ignored"));
         }
     }
@@ -270,14 +343,14 @@ fn run() -> anyhow::Result<()> {
     // 处理完成后得到最终视频文件位置
     let final_path: PathBuf = match (&output_path, &audio_source) {
         (Some(out), Some(src)) => {
-            if !args.quiet {
+            if !render.quiet {
                 eprintln!("{}", lang.t("merging_audio"));
             }
             audio::remux_audio(&temp_path, src, out, audio_range, range).context("音频混流失败")?;
             out.clone()
         }
         (None, Some(src)) => {
-            if !args.quiet {
+            if !render.quiet {
                 eprintln!("{}", lang.t("merging_audio"));
             }
             let target = second_temp.as_ref().unwrap();
@@ -300,14 +373,14 @@ fn run() -> anyhow::Result<()> {
 
     if output_is_stdout {
         stream_to_stdout(&final_path)?;
-        if !args.quiet {
+        if !render.quiet {
             eprintln!("{}", lang.t("output_stdout"));
         }
-    } else if !args.quiet {
+    } else if !render.quiet {
         eprintln!("{}", lang.t_fmt("output_file", final_path.display()));
     }
 
-    if !args.quiet {
+    if !render.quiet {
         eprintln!(
             "{}",
             lang.t_fmt(

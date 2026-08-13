@@ -61,11 +61,27 @@ const BILINGUAL: &[(&str, &str, &str)] = &[
         "为视频叠加B站弹幕（danmaku）的命令行工具，支持从B站视频ID自动获取弹幕XML或指定本地弹幕文件",
         "CLI tool to overlay Bilibili danmaku (bullet comments) onto videos; fetches danmaku XML by Bilibili video ID or from a local file",
     ),
+    // ---- CLI 子命令帮助 ----
+    (
+        "overlay",
+        "为本地视频叠加B站弹幕（支持文件或标准输入）",
+        "Overlay Bilibili danmaku onto a local video (file or stdin input)",
+    ),
+    (
+        "capture",
+        "从采集设备（摄像头、屏幕捕获等）实时输入并叠加弹幕",
+        "Capture from a device (camera, screen, etc.) in real time and overlay danmaku",
+    ),
+    (
+        "list-devices",
+        "列出采集格式的可用设备后退出（dshow/avfoundation）",
+        "List available devices of a capture format and exit (dshow/avfoundation)",
+    ),
     // ---- CLI 参数帮助 ----
     (
         "input",
-        "输入视频文件路径，或 :STDIN: 从标准输入读取，或 :DEVICE: 从采集设备输入（配合 --capture）",
-        "Input video file path, or :STDIN: to read from stdin, or :DEVICE: to capture from a device (with --capture)",
+        "输入视频文件路径，或 :STDIN: 从标准输入读取",
+        "Input video file path, or :STDIN: to read from stdin",
     ),
     (
         "output",
@@ -74,13 +90,13 @@ const BILINGUAL: &[(&str, &str, &str)] = &[
     ),
     (
         "capture",
-        "采集设备规格：{格式}:{URL}，如 dshow:video=USB Camera、gdigrab:desktop、v4l2:/dev/video0、avfoundation:0:none；或直接写 desktop/screen 使用平台默认屏幕捕获（仅 --input :DEVICE: 时有效）",
-        "Capture device spec: {format}:{URL}, e.g. dshow:video=USB Camera, gdigrab:desktop, v4l2:/dev/video0, avfoundation:0:none; or a bare desktop/screen for the platform default screen capture (only with --input :DEVICE:)",
+        "采集设备规格：{格式}:{URL}，如 dshow:video=USB Camera、gdigrab:desktop、v4l2:/dev/video0、avfoundation:0:none；或直接写 desktop/screen 使用平台默认屏幕捕获",
+        "Capture device spec: {format}:{URL}, e.g. dshow:video=USB Camera, gdigrab:desktop, v4l2:/dev/video0, avfoundation:0:none; or a bare desktop/screen for the platform default screen capture",
     ),
     (
         "audio",
-        "音频源文件路径，覆盖视频自带音频（stdin 输入时可用此参数保留音频）",
-        "Path to an audio source file, overriding the video's built-in audio (useful with stdin input)",
+        "音频源文件路径，覆盖视频自带音频（stdin/采集设备输入时可用此参数保留音频）",
+        "Path to an audio source file, overriding the video's built-in audio (useful with stdin or capture device input)",
     ),
     (
         "audio_range",

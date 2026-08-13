@@ -8,7 +8,7 @@ use cosmic_text::{
 use image::{Rgb, RgbaImage};
 use lru::LruCache;
 
-use crate::interaction::Args;
+use crate::interaction::RenderOptions;
 
 /// 项目内置字体（加载顺序即同权重下的回退优先级）。
 struct ProjectFont {
@@ -108,7 +108,7 @@ impl FontStack {
     /// 3. 项目内置字体（思源黑体 → Noto Sans Symbols 2 → Noto Sans Symbols 家族）
     ///
     /// 未提供用户字体时不显式指定主字体族，回退链会先经过系统字体再落到项目字体。
-    pub fn load(args: &Args) -> Result<Self> {
+    pub fn load(args: &RenderOptions) -> Result<Self> {
         let mut db = fontdb::Database::new();
 
         let mut primary_family: Option<String> = None;
@@ -349,8 +349,15 @@ mod tests {
     use super::*;
     use clap::Parser;
 
-    fn args_with(fonts: &[&str], system_fonts: bool) -> Args {
-        let mut argv = vec!["bili_add_on", "--input", "test.mp4", "--bvid", "BV1test"];
+    fn args_with(fonts: &[&str], system_fonts: bool) -> RenderOptions {
+        let mut argv = vec![
+            "bili_add_on",
+            "overlay",
+            "--input",
+            "test.mp4",
+            "--bvid",
+            "BV1test",
+        ];
         for font in fonts {
             argv.push("--font");
             argv.push(font);
@@ -358,7 +365,11 @@ mod tests {
         if system_fonts {
             argv.push("--system-fonts");
         }
-        Args::try_parse_from(argv).unwrap()
+        let cli = crate::interaction::Cli::try_parse_from(argv).unwrap();
+        let crate::interaction::Commands::Overlay(args) = cli.command else {
+            panic!("expected overlay");
+        };
+        args.render
     }
 
     #[test]

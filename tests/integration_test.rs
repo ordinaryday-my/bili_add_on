@@ -1,10 +1,11 @@
-use bili_add_on::interaction::Args;
+use bili_add_on::interaction::{Cli, Commands};
 use clap::Parser;
 
 #[test]
 fn test_cli_full_args_parsing() {
-    let args = Args::try_parse_from([
+    let cli = Cli::try_parse_from([
         "bili_add_on",
+        "overlay",
         "--input",
         "video.mp4",
         "--output",
@@ -31,44 +32,52 @@ fn test_cli_full_args_parsing() {
     ])
     .unwrap();
 
+    let Commands::Overlay(args) = cli.command else {
+        panic!("expected overlay");
+    };
     assert_eq!(args.input, "video.mp4");
-    assert_eq!(args.output.unwrap(), "out.mp4");
-    assert_eq!(args.source.bvid.unwrap(), "BV1fRNH6kEra");
-    assert!(args.source.xml.is_none());
-    assert!((args.opacity - 0.5).abs() < f64::EPSILON);
-    assert!((args.top_ratio - 0.1).abs() < f64::EPSILON);
-    assert!((args.bottom_ratio - 0.9).abs() < f64::EPSILON);
-    assert_eq!(args.font_scale, 1.5);
-    assert_eq!(args.speed, 5);
-    assert_eq!(args.line_spacing, 3);
-    assert!((args.fixed_duration - 10.0).abs() < f64::EPSILON);
-    assert_eq!(args.encoder, "software");
-    assert!(args.quiet);
-    assert!(!args.no_audio);
+    assert_eq!(args.output.as_deref(), Some("out.mp4"));
+    assert_eq!(args.render.source.bvid.unwrap(), "BV1fRNH6kEra");
+    assert!(args.render.source.xml.is_none());
+    assert!((args.render.opacity - 0.5).abs() < f64::EPSILON);
+    assert!((args.render.top_ratio - 0.1).abs() < f64::EPSILON);
+    assert!((args.render.bottom_ratio - 0.9).abs() < f64::EPSILON);
+    assert_eq!(args.render.font_scale, 1.5);
+    assert_eq!(args.render.speed, 5);
+    assert_eq!(args.render.line_spacing, 3);
+    assert!((args.render.fixed_duration - 10.0).abs() < f64::EPSILON);
+    assert_eq!(args.render.encoder, "software");
+    assert!(args.render.quiet);
+    assert!(!args.render.no_audio);
 }
 
 #[test]
 fn test_cli_default_values() {
-    let args =
-        Args::try_parse_from(["bili_add_on", "--input", "video.mp4", "--bvid", "BV1test"]).unwrap();
+    let cli =
+        Cli::try_parse_from(["bili_add_on", "overlay", "--input", "video.mp4", "--bvid", "BV1test"])
+            .unwrap();
 
-    assert!((args.opacity - 0.93).abs() < f64::EPSILON);
-    assert!((args.top_ratio - 0.0).abs() < f64::EPSILON);
-    assert!((args.bottom_ratio - 1.0).abs() < f64::EPSILON);
-    assert!((args.font_scale - 1.0).abs() < f32::EPSILON);
-    assert_eq!(args.speed, 3);
-    assert_eq!(args.line_spacing, 4);
-    assert!((args.fixed_duration - 5.0).abs() < f64::EPSILON);
-    assert_eq!(args.encoder, "auto");
-    assert!(!args.quiet);
-    assert!(!args.no_audio);
+    let Commands::Overlay(args) = cli.command else {
+        panic!("expected overlay");
+    };
+    assert!((args.render.opacity - 0.93).abs() < f64::EPSILON);
+    assert!((args.render.top_ratio - 0.0).abs() < f64::EPSILON);
+    assert!((args.render.bottom_ratio - 1.0).abs() < f64::EPSILON);
+    assert!((args.render.font_scale - 1.0).abs() < f32::EPSILON);
+    assert_eq!(args.render.speed, 3);
+    assert_eq!(args.render.line_spacing, 4);
+    assert!((args.render.fixed_duration - 5.0).abs() < f64::EPSILON);
+    assert_eq!(args.render.encoder, "auto");
+    assert!(!args.render.quiet);
+    assert!(!args.render.no_audio);
     assert!(args.output.is_none());
 }
 
 #[test]
 fn test_cli_xml_source() {
-    let args = Args::try_parse_from([
+    let cli = Cli::try_parse_from([
         "bili_add_on",
+        "overlay",
         "--input",
         "video.mp4",
         "--xml",
@@ -76,15 +85,19 @@ fn test_cli_xml_source() {
     ])
     .unwrap();
 
-    assert_eq!(args.source.xml.unwrap().to_string_lossy(), "danmaku.xml");
-    assert!(args.source.bvid.is_none());
+    let Commands::Overlay(args) = cli.command else {
+        panic!("expected overlay");
+    };
+    assert_eq!(args.render.source.xml.unwrap().to_string_lossy(), "danmaku.xml");
+    assert!(args.render.source.bvid.is_none());
 }
 
 #[test]
 fn test_cli_encoder_options() {
     for enc in &["auto", "nvenc", "amf", "qsv", "software"] {
-        let args = Args::try_parse_from([
+        let cli = Cli::try_parse_from([
             "bili_add_on",
+            "overlay",
             "--input",
             "v.mp4",
             "--bvid",
@@ -93,14 +106,18 @@ fn test_cli_encoder_options() {
             enc,
         ])
         .unwrap();
-        assert_eq!(args.encoder, *enc);
+        let Commands::Overlay(args) = cli.command else {
+            panic!("expected overlay");
+        };
+        assert_eq!(args.render.encoder, *enc);
     }
 }
 
 #[test]
 fn test_check_output_path_generation() {
-    let mut args = Args::try_parse_from([
+    let cli = Cli::try_parse_from([
         "bili_add_on",
+        "overlay",
         "--input",
         "/home/user/videos/test_video.mp4",
         "--bvid",
@@ -108,6 +125,9 @@ fn test_check_output_path_generation() {
     ])
     .unwrap();
 
+    let Commands::Overlay(mut args) = cli.command else {
+        panic!("expected overlay");
+    };
     args.check_output().unwrap();
     let out = args.output.unwrap();
     assert_eq!(
@@ -121,8 +141,9 @@ fn test_check_output_path_generation() {
 
 #[test]
 fn test_cli_stdin_stdout_special_values() {
-    let args = Args::try_parse_from([
+    let cli = Cli::try_parse_from([
         "bili_add_on",
+        "overlay",
         "--input",
         bili_add_on::interaction::STDIN,
         "--output",
@@ -131,41 +152,58 @@ fn test_cli_stdin_stdout_special_values() {
         "BV1test",
     ])
     .unwrap();
+
+    let Commands::Overlay(args) = cli.command else {
+        panic!("expected overlay");
+    };
     assert_eq!(args.input, bili_add_on::interaction::STDIN);
     assert_eq!(args.output.as_deref(), Some(bili_add_on::interaction::STDOUT));
 }
 
 #[test]
-fn test_cli_device_input() {
-    let args = Args::try_parse_from([
+fn test_cli_capture() {
+    let cli = Cli::try_parse_from([
         "bili_add_on",
-        "--input",
-        bili_add_on::interaction::DEVICE,
-        "--output",
-        "out.mp4",
+        "capture",
         "--capture",
         "gdigrab:desktop",
         "--range",
         "30",
+        "--output",
+        "out.mp4",
         "--bvid",
         "BV1test",
     ])
     .unwrap();
-    assert_eq!(args.input, bili_add_on::interaction::DEVICE);
-    assert_eq!(args.capture.as_deref(), Some("gdigrab:desktop"));
-    assert_eq!(args.range.as_deref(), Some("30"));
+
+    let Commands::Capture(args) = cli.command else {
+        panic!("expected capture");
+    };
+    assert_eq!(args.capture, "gdigrab:desktop");
+    assert_eq!(args.range, "30");
+    assert_eq!(args.output, "out.mp4");
+}
+
+#[test]
+fn test_cli_list_devices() {
+    let cli = Cli::try_parse_from(["bili_add_on", "list-devices", "dshow"]).unwrap();
+    let Commands::ListDevices(args) = cli.command else {
+        panic!("expected list-devices");
+    };
+    assert_eq!(args.format, "dshow");
 }
 
 #[test]
 fn test_cli_parse_fails_missing_source() {
-    let args = Args::try_parse_from(["bili_add_on", "--input", "video.mp4"]);
-    assert!(args.is_err());
+    assert!(Cli::try_parse_from(["bili_add_on", "overlay", "--input", "video.mp4"]).is_err());
 }
 
 #[test]
-fn test_cli_parse_fails_missing_input() {
-    let args = Args::try_parse_from(["bili_add_on", "--bvid", "BV1test"]);
-    assert!(args.is_err());
+fn test_cli_parse_fails_missing_subcommand() {
+    assert!(Cli::try_parse_from(["bili_add_on"]).is_err());
+    assert!(
+        Cli::try_parse_from(["bili_add_on", "overlay", "--bvid", "BV1test"]).is_err()
+    );
 }
 
 #[test]

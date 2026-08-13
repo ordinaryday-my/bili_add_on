@@ -31,26 +31,28 @@ cargo build --release
 
 ## 用法
 
-### 基本用法
+命令按子命令组织：`overlay`（本地文件/标准输入叠加弹幕）、`capture`（采集设备实时输入）、`list-devices`（列出采集设备）。`overlay` 与 `capture` 共享全部渲染参数。
+
+### overlay：基本用法
 
 ```bash
 # 从 B 站视频 ID 拉取弹幕并叠加到本地视频
-bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx
+bili_add_on overlay --input input.mp4 --bvid BV1xxxxxxxxxx
 
 # 使用本地弹幕 XML 文件
-bili_add_on --input input.mp4 --xml danmaku.xml
+bili_add_on overlay --input input.mp4 --xml danmaku.xml
 ```
 
 `--bvid` 和 `--xml` 二者必选其一，不可同时使用。
 
-### 标准输入 / 标准输出
+### overlay：标准输入 / 标准输出
 
 `--input :STDIN:` 从标准输入读取视频，`--output :STDOUT:` 将结果写入标准输出（进度与日志始终输出到 stderr）。两者可单独使用，也可组合形成管道：
 
 ```bash
 # 生成可流式传输的 fMP4，经管道处理后输出到标准输出
 ffmpeg -i input.mp4 -c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1 \
-    | bili_add_on --input :STDIN: --output :STDOUT: --bvid BV1xxxxxxxxxx > output.mp4
+    | bili_add_on overlay --input :STDIN: --output :STDOUT: --bvid BV1xxxxxxxxxx > output.mp4
 ```
 
 限制与注意事项：
@@ -61,31 +63,44 @@ ffmpeg -i input.mp4 -c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1 \
 - 使用 stdin 输入时 `--output` 不可省略（无法自动生成默认文件名）。
 - 输出到 stdout 时先写入临时文件再整体输出，并非边处理边输出。
 
-### 采集设备输入（摄像头 / 屏幕捕获）
+### capture：采集设备输入（摄像头 / 屏幕捕获）
 
-`--input :DEVICE:` 从采集设备实时输入，需用 `--capture` 指定设备规格（`{格式}:{URL}`，与 ffmpeg CLI 的 `-f {格式} -i {URL}` 对应）：
+`capture` 从采集设备实时输入，需用 `--capture` 指定设备规格（`{格式}:{URL}`，与 ffmpeg CLI 的 `-f {格式} -i {URL}` 对应），并强制指定 `--range` 结束时间：
 
 ```bash
 # Windows：摄像头（dshow）
-bili_add_on --input :DEVICE: --capture "dshow:video=USB Camera" \
+bili_add_on capture --capture "dshow:video=USB Camera" \
     --output out.mp4 --bvid BV1xxxxxxxxxx --range 30
 
 # Windows / Linux / macOS：屏幕捕获
-bili_add_on --input :DEVICE: --capture gdigrab:desktop --output out.mp4 --xml danmaku.xml --range 30
-bili_add_on --input :DEVICE: --capture x11grab::0.0   --output out.mp4 --xml danmaku.xml --range 30
-bili_add_on --input :DEVICE: --capture "avfoundation:1:none" --output out.mp4 --xml danmaku.xml --range 30
+bili_add_on capture --capture gdigrab:desktop --output out.mp4 --xml danmaku.xml --range 30
+bili_add_on capture --capture x11grab::0.0   --output out.mp4 --xml danmaku.xml --range 30
+bili_add_on capture --capture "avfoundation:1:none" --output out.mp4 --xml danmaku.xml --range 30
 
 # 裸名 desktop/screen 使用平台默认屏幕捕获（Windows→gdigrab、Linux→x11grab、macOS→avfoundation）
-bili_add_on --input :DEVICE: --capture desktop --output out.mp4 --xml danmaku.xml --range 30
+bili_add_on capture --capture desktop --output out.mp4 --xml danmaku.xml --range 30
 ```
 
 限制与注意事项：
 
-- 采集源没有尽头，`--range` **必填**且**只能写结束时间**（如 `--range 30`、`--range 1:23`），不允许起始时间（`5-30` 会报错）。
+- 采集源没有尽头，`--range` **必填**且**只能写结束时间**（如 `--range 30`、`--range 1:23`），不允许起始时间（`5-30` 会直接报错）。
 - 摄像头/麦克风音频无法从采集设备混流（实时流无法二次读取），会打印警告并输出纯视频；可用 `--audio` 指定外部音频文件。
 - 首帧时间戳自动归一化为 0，弹幕时间轴与采集起点对齐。
-- 采集设备输入的帧率通常由设备决定；无法获取时按 25 fps 处理。
+- 采集设备输入的帧率由设备决定；无法获取时按 25 fps 处理。
 - 需要 ffmpeg 编译包含对应采集格式（dshow / gdigrab / v4l2 / x11grab / avfoundation）。
+
+### list-devices：列出采集设备
+
+```bash
+# 列出 Windows dshow / macOS avfoundation 的可用设备（相机、麦克风、屏幕）
+bili_add_on list-devices dshow
+bili_add_on list-devices avfoundation
+
+# gdigrab / v4l2 无设备列表，会打印使用提示
+bili_add_on list-devices gdigrab
+```
+
+打开采集设备失败（如设备名错误、设备被占用）时，程序会自动打印对应格式的设备列表辅助排查。
 
 ### 外部音频源与音频裁剪
 
@@ -94,7 +109,7 @@ bili_add_on --input :DEVICE: --capture desktop --output out.mp4 --xml danmaku.xm
 ```bash
 # 示例：音频源 A=[0:00:00-0:30:00]，--audio-range 5-10 裁出 B=[0:00:05-0:00:10]
 #       并与视频开头对齐；--range 3 再取 B 的前 3 秒 → 输出音频 = A[5s, 8s)
-bili_add_on --input input.mp4 --xml danmaku.xml \
+bili_add_on overlay --input input.mp4 --xml danmaku.xml \
     --audio audio.m4a --audio-range 5-10 --range 3
 ```
 
@@ -102,20 +117,35 @@ stdin 输入搭配外部音频的完整示例：
 
 ```bash
 ffmpeg -i input.mp4 -c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1 \
-    | bili_add_on --input :STDIN: --output out.mp4 --xml danmaku.xml \
+    | bili_add_on overlay --input :STDIN: --output out.mp4 --xml danmaku.xml \
         --audio audio.m4a --audio-range 5-10
 ```
 
 ### 参数说明
 
+**overlay 专属参数**
+
 | 参数 | 简写 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--input` | `-i` | **必填** | 输入视频文件路径，或 `:STDIN:` 从标准输入读取，或 `:DEVICE:` 从采集设备输入（配合 `--capture`） |
+| `--input` | `-i` | **必填** | 输入视频文件路径，或 `:STDIN:` 从标准输入读取 |
 | `--output` | `-o` | `bili_add_on_<源文件名>` | 输出视频路径，或 `:STDOUT:` 输出到标准输出 |
-| `--capture` | | | 采集设备规格：`{格式}:{URL}`，如 `dshow:video=USB Camera`、`gdigrab:desktop`、`v4l2:/dev/video0`、`avfoundation:0:none`；或直接写 `desktop`/`screen` 使用平台默认屏幕捕获（仅 `--input :DEVICE:` 时有效） |
+| `--range` | | | 视频处理时段：`{起始}-{结束}` 或 `{结束}`，如 `1:23-5:00`、`162:12` |
+
+**capture 专属参数**
+
+| 参数 | 简写 | 默认值 | 说明 |
+|------|------|--------|------|
+| `--capture` | | **必填** | 采集设备规格：`{格式}:{URL}`，如 `dshow:video=USB Camera`、`gdigrab:desktop`、`v4l2:/dev/video0`、`avfoundation:0:none`；或直接写 `desktop`/`screen` 使用平台默认屏幕捕获 |
+| `--range` | | **必填** | 录制时长（仅结束时间，如 `30`、`1:23`），不允许起始时间 |
+| `--output` | `-o` | **必填** | 输出视频路径，或 `:STDOUT:` 输出到标准输出（无源文件名，不可省略） |
+
+**overlay / capture 共享渲染参数**
+
+| 参数 | 简写 | 默认值 | 说明 |
+|------|------|--------|------|
 | `--bvid` | | | B 站视频 ID（如 `BV1xxxxxxxxxx`），自动拉取弹幕 |
 | `--xml` | `-x` | | 本地弹幕 XML 文件路径 |
-| `--audio` | | | 音频源文件路径，覆盖视频自带音频（stdin 输入时可用此参数保留音频） |
+| `--audio` | | | 音频源文件路径，覆盖视频自带音频（stdin/采集设备输入时可用此参数保留音频） |
 | `--audio-range` | | | 音频裁剪时段：`{起始}-{结束}` 或 `{结束}`；先按此裁剪音频并对齐视频开头，再随视频一起按 `--range` 裁剪 |
 | `--opacity` | | `0.93` | 弹幕不透明度，取值范围 0~1 |
 | `--top-ratio` | `-t` | `0.0` | 弹幕显示区域上界与画面高度比值，0 为顶端 |
@@ -150,7 +180,7 @@ ffmpeg -i input.mp4 -c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1 \
 软件编码使用 libx264，默认预设为 `medium`。追求编码速度时可用更快的预设（如 `veryfast`，编码速度通常可提升数倍，代价是压缩率略降）：
 
 ```bash
-bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx --encoder software --x264-preset veryfast
+bili_add_on overlay --input input.mp4 --bvid BV1xxxxxxxxxx --encoder software --x264-preset veryfast
 ```
 
 ### 弹幕区域控制
@@ -166,7 +196,7 @@ bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx --encoder software --x264-pre
 通过调整 `--top-ratio` 和 `--bottom-ratio` 可以控制弹幕在画面中的垂直显示范围。例如将弹幕限制在视频上半部分：
 
 ```bash
-bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx --top-ratio 0.0 --bottom-ratio 0.5
+bili_add_on overlay --input input.mp4 --bvid BV1xxxxxxxxxx --top-ratio 0.0 --bottom-ratio 0.5
 ```
 
 ## 支持的弹幕模式
@@ -197,7 +227,7 @@ bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx --top-ratio 0.0 --bottom-rati
 多个 `--font` 按传入顺序依次降级：
 
 ```bash
-bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx \
+bili_add_on overlay --input input.mp4 --bvid BV1xxxxxxxxxx \
     --font noto-emoji.ttf --font noto-symbols.ttf
 ```
 
@@ -218,7 +248,7 @@ bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx \
 - 组合示例（覆盖符号 + emoji）：
 
 ```bash
-bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx \
+bili_add_on overlay --input input.mp4 --bvid BV1xxxxxxxxxx \
     --font NotoSansSymbols-Regular.ttf --font NotoColorEmoji.ttf
 ```
 

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{CommandFactory, FromArgMatches, Parser};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use regex::Regex;
 use std::{
     cmp::Ordering,
@@ -13,16 +13,36 @@ use crate::i18n::Lang;
 pub const STDIN: &str = ":STDIN:";
 /// `--output` 特殊值：将视频写入标准输出。
 pub const STDOUT: &str = ":STDOUT:";
-/// `--input` 特殊值：从采集设备（摄像头、屏幕捕获等）实时输入。
-pub const DEVICE: &str = ":DEVICE:";
 
 #[derive(Debug, Parser)]
-#[command(version, author, about)]
-pub struct Args {
+#[command(
+    version,
+    author,
+    about,
+    subcommand_required = true,
+    arg_required_else_help = true
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Commands {
+    /// 为本地视频叠加B站弹幕（支持文件或标准输入）
+    Overlay(OverlayArgs),
+    /// 从采集设备（摄像头、屏幕捕获等）实时输入并叠加弹幕
+    Capture(CaptureArgs),
+    /// 列出采集格式的可用设备后退出（dshow/avfoundation）
+    ListDevices(ListDevicesArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct OverlayArgs {
     #[arg(
         long,
         short,
-        help = "输入视频文件路径，或 :STDIN: 从标准输入读取，或 :DEVICE: 从采集设备输入（配合 --capture）"
+        help = "输入视频文件路径，或 :STDIN: 从标准输入读取"
     )]
     pub input: String,
 
@@ -33,6 +53,54 @@ pub struct Args {
     )]
     pub output: Option<String>,
 
+    #[arg(
+        long,
+        value_name = "TIME_RANGE",
+        help = "视频处理时段：{起始}-{结束} 或 {结束}；时间格式为 时:分:秒 / 分:秒 / 秒，如 1:23-5:00、162:12、3.1415926"
+    )]
+    pub range: Option<String>,
+
+    #[command(flatten)]
+    pub render: RenderOptions,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct CaptureArgs {
+    #[arg(
+        long,
+        value_name = "SPEC",
+        help = "采集设备规格：{格式}:{URL}，如 dshow:video=USB Camera、gdigrab:desktop、v4l2:/dev/video0、avfoundation:0:none；或直接写 desktop/screen 使用平台默认屏幕捕获"
+    )]
+    pub capture: String,
+
+    #[arg(
+        long,
+        value_name = "TIME_RANGE",
+        value_parser = parse_capture_range,
+        help = "录制时长（仅结束时间，如 30、1:23）。采集源没有尽头，必须指定且不允许起始时间"
+    )]
+    pub range: String,
+
+    #[arg(
+        long,
+        short,
+        help = "输出视频路径，或 :STDOUT: 输出到标准输出（采集设备输入无源文件名，必填）"
+    )]
+    pub output: String,
+
+    #[command(flatten)]
+    pub render: RenderOptions,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ListDevicesArgs {
+    /// 采集格式名：dshow / avfoundation（gdigrab、v4l2 等无设备列表）
+    pub format: String,
+}
+
+/// 共享渲染参数（overlay / capture 均可用）。
+#[derive(clap::Args, Debug)]
+pub struct RenderOptions {
     #[command(flatten)]
     pub source: DanmakuSource,
 
@@ -124,15 +192,8 @@ pub struct Args {
 
     #[arg(
         long,
-        value_name = "TIME_RANGE",
-        help = "视频处理时段：{起始}-{结束} 或 {结束}；时间格式为 时:分:秒 / 分:秒 / 秒，如 1:23-5:00、162:12、3.1415926"
-    )]
-    pub range: Option<String>,
-
-    #[arg(
-        long,
         value_name = "AUDIO_FILE",
-        help = "音频源文件路径，覆盖视频自带音频（stdin 输入时可用此参数保留音频）"
+        help = "音频源文件路径，覆盖视频自带音频（stdin/采集设备输入时可用此参数保留音频）"
     )]
     pub audio: Option<PathBuf>,
 
@@ -145,13 +206,6 @@ pub struct Args {
 
     #[arg(
         long,
-        value_name = "SPEC",
-        help = "采集设备规格：{格式}:{URL}，如 dshow:video=USB Camera、gdigrab:desktop、v4l2:/dev/video0、avfoundation:0:none；或直接写 desktop/screen 使用平台默认屏幕捕获（仅 --input :DEVICE: 时有效）"
-    )]
-    pub capture: Option<String>,
-
-    #[arg(
-        long,
         value_name = "LANG",
         default_value = "auto",
         value_parser = ["zh", "en", "auto"],
@@ -160,29 +214,9 @@ pub struct Args {
     pub lang: String,
 }
 
-impl Args {
-    /// 解析命令行参数并按 `--lang`/系统区域本地化帮助文本。
-    ///
-    /// 返回 `(参数, 语言)`；`--help` 时由 clap 以本地化文本输出并退出。
-    pub fn parse_with_locale() -> Result<(Args, Lang)> {
-        Self::parse_with_locale_from(std::env::args())
-    }
-
-    fn parse_with_locale_from(argv: impl IntoIterator<Item = String>) -> Result<(Args, Lang)> {
-        let argv: Vec<String> = argv.into_iter().collect();
-        let lang = Lang::detect(lang_arg_from(&argv).as_deref());
-        let mut cmd = Args::command();
-        cmd = cmd.about(lang.t("about"));
-        cmd = cmd.mut_args(|arg| match lang.arg_help(arg.get_id().as_str()) {
-            Some(en) => arg.help(Some(en)),
-            None => arg,
-        });
-        let matches = cmd.get_matches_from(argv);
-        let args = Args::from_arg_matches(&matches).map_err(|e| anyhow!("{e}"))?;
-        Ok((args, lang))
-    }
+impl OverlayArgs {
     pub fn check(&self) -> anyhow::Result<()> {
-        if !self.is_special_input() {
+        if self.input != STDIN {
             if !Path::new(&self.input).exists() {
                 bail!("视频源不存在: {}", self.input);
             }
@@ -192,6 +226,51 @@ impl Args {
             }
         }
 
+        self.render.check()?;
+
+        if let Some(range) = &self.range {
+            parse_time_range(range)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn check_output(&mut self) -> anyhow::Result<()> {
+        if self.output.is_none() {
+            if self.input == STDIN {
+                bail!("使用 stdin 输入时必须显式指定 --output（文件路径或 :STDOUT:）");
+            }
+            let mut from = PathBuf::from(&self.input);
+            let mut prefix = OsString::from("bili_add_on_");
+            prefix.push(
+                from.file_name()
+                    .with_context(|| format!("无法从路径获取文件名: {}", self.input))?,
+            );
+            from.set_file_name(prefix);
+
+            self.output = Some(from.to_string_lossy().into_owned());
+        }
+
+        Ok(())
+    }
+}
+
+impl CaptureArgs {
+    pub fn check(&self) -> anyhow::Result<()> {
+        if let Some((_, url)) = self.capture.split_once(':')
+            && url.is_empty()
+        {
+            bail!(
+                "--capture 规格无效: '{}'（{{格式}}:{{URL}} 中 URL 不能为空）",
+                self.capture
+            );
+        }
+        self.render.check()
+    }
+}
+
+impl RenderOptions {
+    pub fn check(&self) -> anyhow::Result<()> {
         if let Some(p) = &self.source.xml {
             if !p.exists() {
                 bail!("弹幕文件不存在: {}", p.display());
@@ -291,10 +370,6 @@ impl Args {
             );
         }
 
-        if let Some(range) = &self.range {
-            parse_time_range(range)?;
-        }
-
         if let Some(path) = &self.audio {
             if !path.exists() {
                 bail!("音频文件不存在: {}", path.display());
@@ -315,52 +390,6 @@ impl Args {
             }
         }
 
-        if self.input == DEVICE {
-            let Some(capture) = &self.capture else {
-                bail!("使用 :DEVICE: 输入时必须指定 --capture（如 dshow:video=USB Camera、gdigrab:desktop）");
-            };
-            if let Some((_, url)) = capture.split_once(':')
-                && url.is_empty()
-            {
-                bail!("--capture 规格无效: '{capture}'（{{格式}}:{{URL}} 中 URL 不能为空）");
-            }
-            let Some(range) = &self.range else {
-                bail!("采集设备输入必须指定 --range（采集源没有尽头，需用结束时间确定时长，如 --range 30）");
-            };
-            if range.contains('-') {
-                bail!("采集设备输入不支持 --range 起始时间，请只写结束时间（如 --range 30）");
-            }
-        } else if self.capture.is_some() {
-            bail!("--capture 仅在使用 --input :DEVICE: 时有效");
-        }
-
-        Ok(())
-    }
-
-    /// 输入是否为特殊值（stdin / 采集设备），此时不检查文件存在性。
-    fn is_special_input(&self) -> bool {
-        self.input == STDIN || self.input == DEVICE
-    }
-
-    pub fn check_output(&mut self) -> anyhow::Result<()> {
-        if self.output.is_none() {
-            if self.input == STDIN {
-                bail!("使用 stdin 输入时必须显式指定 --output（文件路径或 :STDOUT:）");
-            }
-            if self.input == DEVICE {
-                bail!("使用采集设备输入时必须显式指定 --output（文件路径或 :STDOUT:）");
-            }
-            let mut from = PathBuf::from(&self.input);
-            let mut prefix = OsString::from("bili_add_on_");
-            prefix.push(
-                from.file_name()
-                    .with_context(|| format!("无法从路径获取文件名: {}", self.input))?,
-            );
-            from.set_file_name(prefix);
-
-            self.output = Some(from.to_string_lossy().into_owned());
-        }
-
         Ok(())
     }
 
@@ -372,6 +401,36 @@ impl Args {
         let res: Result<Vec<_>, _> = filters.iter().map(|s| Regex::new(s.as_str())).collect();
 
         Some(res)
+    }
+}
+
+impl Cli {
+    /// 解析命令行参数并按 `--lang`/系统区域本地化帮助文本。
+    ///
+    /// 返回 `(参数, 语言)`；`--help` 时由 clap 以本地化文本输出并退出。
+    pub fn parse_with_locale() -> Result<(Cli, Lang)> {
+        Self::parse_with_locale_from(std::env::args())
+    }
+
+    fn parse_with_locale_from(argv: impl IntoIterator<Item = String>) -> Result<(Cli, Lang)> {
+        let argv: Vec<String> = argv.into_iter().collect();
+        let lang = Lang::detect(lang_arg_from(&argv).as_deref());
+        let mut cmd = Cli::command();
+        cmd = cmd.about(lang.t("about"));
+        cmd = cmd.mut_subcommands(|sc| {
+            let name = sc.get_name().to_string();
+            match lang.arg_help(&name) {
+                Some(en) => sc.about(Some(en)),
+                None => sc,
+            }
+        });
+        cmd = cmd.mut_args(|arg| match lang.arg_help(arg.get_id().as_str()) {
+            Some(en) => arg.help(Some(en)),
+            None => arg,
+        });
+        let matches = cmd.get_matches_from(argv);
+        let cli = Cli::from_arg_matches(&matches).map_err(|e| anyhow!("{e}"))?;
+        Ok((cli, lang))
     }
 }
 
@@ -445,7 +504,7 @@ pub fn parse_time_range(s: &str) -> Result<(f64, f64)> {
             let start = parse_time_point(start)
                 .with_context(|| format!("起始时间无效（--range '{s}'）"))?;
             let end =
-                parse_time_point(end).with_context(|| format!("结束时间无效（--range '{s}'）"))?;
+                parse_time_point(end).with_context(|| format!("结束时间无效（--range '{s}'"))?;
             (start, end)
         }
         None => {
@@ -459,6 +518,15 @@ pub fn parse_time_range(s: &str) -> Result<(f64, f64)> {
         bail!("--range 的起始时间 ({start} 秒) 必须小于结束时间 ({end} 秒)");
     }
     Ok((start, end))
+}
+
+/// 采集设备输入 `--range` 的 clap 值解析器：仅允许结束时间（`{结束}`），拒绝起始时间。
+fn parse_capture_range(s: &str) -> Result<String, String> {
+    if s.contains('-') {
+        return Err("采集设备输入不支持起始时间，请只写结束时间（如 --range 30）".to_string());
+    }
+    parse_time_range(s).map_err(|e| e.to_string())?;
+    Ok(s.to_string())
 }
 
 #[derive(clap::Args, Debug)]
@@ -475,10 +543,8 @@ pub struct DanmakuSource {
 mod tests {
     use super::*;
 
-    fn default_args() -> Args {
-        Args {
-            input: "test.mp4".to_string(),
-            output: Some("output.mp4".to_string()),
+    fn default_render() -> RenderOptions {
+        RenderOptions {
             source: DanmakuSource {
                 bvid: Some("BV1test".to_string()),
                 xml: None,
@@ -499,45 +565,243 @@ mod tests {
             x264_preset: "medium".to_string(),
             longest: false,
             filter: Some(vec![]),
-            range: None,
             audio: None,
             audio_range: None,
-            capture: None,
             lang: "auto".to_string(),
         }
     }
 
+    fn default_overlay() -> OverlayArgs {
+        OverlayArgs {
+            input: "test.mp4".to_string(),
+            output: Some("output.mp4".to_string()),
+            range: None,
+            render: default_render(),
+        }
+    }
+
+    fn parse_overlay(argv: &[&str]) -> OverlayArgs {
+        let mut full = vec!["bili_add_on", "overlay"];
+        full.extend_from_slice(argv);
+        let cli = Cli::try_parse_from(full).unwrap();
+        match cli.command {
+            Commands::Overlay(args) => args,
+            _ => panic!("expected overlay"),
+        }
+    }
+
+    fn parse_capture(argv: &[&str]) -> CaptureArgs {
+        let mut full = vec!["bili_add_on", "capture"];
+        full.extend_from_slice(argv);
+        let cli = Cli::try_parse_from(full).unwrap();
+        match cli.command {
+            Commands::Capture(args) => args,
+            _ => panic!("expected capture"),
+        }
+    }
+
+    #[test]
+    fn test_clap_parse_overlay_full_args() {
+        let args = parse_overlay(&[
+            "--input",
+            "video.mp4",
+            "--output",
+            "out.mp4",
+            "--bvid",
+            "BV1fRNH6kEra",
+            "--opacity",
+            "0.5",
+            "--top-ratio",
+            "0.1",
+            "--bottom-ratio",
+            "0.9",
+            "--font-scale",
+            "1.5",
+            "--speed",
+            "5",
+            "--line-spacing",
+            "3",
+            "--fixed-duration",
+            "10.0",
+            "--encoder",
+            "software",
+            "--quiet",
+        ]);
+        assert_eq!(args.input, "video.mp4");
+        assert_eq!(args.output.as_deref(), Some("out.mp4"));
+        assert_eq!(args.render.source.bvid.unwrap(), "BV1fRNH6kEra");
+        assert!(args.render.source.xml.is_none());
+        assert!((args.render.opacity - 0.5).abs() < f64::EPSILON);
+        assert_eq!(args.render.speed, 5);
+        assert_eq!(args.render.encoder, "software");
+        assert!(args.render.quiet);
+    }
+
+    #[test]
+    fn test_clap_parse_overlay_default_values() {
+        let args = parse_overlay(&["--input", "video.mp4", "--bvid", "BV1test"]);
+        assert!((args.render.opacity - 0.93).abs() < f64::EPSILON);
+        assert_eq!(args.render.speed, 3);
+        assert_eq!(args.render.encoder, "auto");
+        assert!(args.output.is_none());
+    }
+
+    #[test]
+    fn test_clap_parse_requires_source() {
+        assert!(
+            Cli::try_parse_from(["bili_add_on", "overlay", "--input", "video.mp4"]).is_err()
+        );
+        assert!(Cli::try_parse_from([
+            "bili_add_on",
+            "capture",
+            "--capture",
+            "gdigrab:desktop",
+            "--range",
+            "30",
+            "--output",
+            "out.mp4"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn test_clap_parse_overlay_font_and_lang() {
+        let args = parse_overlay(&[
+            "--input",
+            "v.mp4",
+            "--bvid",
+            "BV1test",
+            "--font",
+            "a.ttf",
+            "--font",
+            "b.ttf",
+            "--system-fonts",
+            "--lang",
+            "zh",
+        ]);
+        assert_eq!(args.render.font.len(), 2);
+        assert!(args.render.system_fonts);
+        assert_eq!(args.render.lang, "zh");
+
+        assert!(Cli::try_parse_from([
+            "bili_add_on",
+            "overlay",
+            "--input",
+            "v.mp4",
+            "--bvid",
+            "BV1test",
+            "--lang",
+            "fr"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_capture_required() {
+        // 缺少 --range
+        assert!(Cli::try_parse_from([
+            "bili_add_on",
+            "capture",
+            "--capture",
+            "gdigrab:desktop",
+            "--output",
+            "out.mp4",
+            "--bvid",
+            "BV1test"
+        ])
+        .is_err());
+        // 缺少 --capture
+        assert!(Cli::try_parse_from([
+            "bili_add_on",
+            "capture",
+            "--range",
+            "30",
+            "--output",
+            "out.mp4",
+            "--bvid",
+            "BV1test"
+        ])
+        .is_err());
+        // 缺少 --output
+        assert!(Cli::try_parse_from([
+            "bili_add_on",
+            "capture",
+            "--capture",
+            "gdigrab:desktop",
+            "--range",
+            "30",
+            "--bvid",
+            "BV1test"
+        ])
+        .is_err());
+        // --range 不允许起始时间
+        assert!(Cli::try_parse_from([
+            "bili_add_on",
+            "capture",
+            "--capture",
+            "gdigrab:desktop",
+            "--range",
+            "5-30",
+            "--output",
+            "out.mp4",
+            "--bvid",
+            "BV1test"
+        ])
+        .is_err());
+        // --range 语法错误
+        assert!(Cli::try_parse_from([
+            "bili_add_on",
+            "capture",
+            "--capture",
+            "gdigrab:desktop",
+            "--range",
+            "abc",
+            "--output",
+            "out.mp4",
+            "--bvid",
+            "BV1test"
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_capture_ok() {
+        let args = parse_capture(&[
+            "--capture",
+            "dshow:video=USB Camera",
+            "--range",
+            "30",
+            "--output",
+            "out.mp4",
+            "--bvid",
+            "BV1test",
+        ]);
+        assert_eq!(args.capture, "dshow:video=USB Camera");
+        assert_eq!(args.range, "30");
+        assert_eq!(args.output, "out.mp4");
+    }
+
+    #[test]
+    fn test_cli_parse_list_devices_without_input_or_source() {
+        let cli = Cli::try_parse_from(["bili_add_on", "list-devices", "dshow"]).unwrap();
+        let Commands::ListDevices(args) = cli.command else {
+            panic!("expected list-devices");
+        };
+        assert_eq!(args.format, "dshow");
+    }
+
+    #[test]
+    fn test_cli_requires_subcommand() {
+        use clap::Parser;
+        assert!(Cli::try_parse_from(["bili_add_on"]).is_err());
+        assert!(Cli::try_parse_from(["bili_add_on", "unknown-cmd"]).is_err());
+    }
+
     #[test]
     fn test_check_output_generates_default_path() {
-        let mut args = Args {
-            input: "videos/my_video.mp4".to_string(),
-            output: None,
-            source: DanmakuSource {
-                bvid: Some("BV1test".to_string()),
-                xml: None,
-            },
-            opacity: 0.93,
-            top_ratio: 0.0,
-            bottom_ratio: 1.0,
-            font_scale: 1.0,
-            font: vec![],
-            system_fonts: false,
-            speed: 3,
-            line_spacing: 4,
-            min_space: 20,
-            fixed_duration: 5.0,
-            no_audio: false,
-            quiet: false,
-            encoder: "auto".to_string(),
-            x264_preset: "medium".to_string(),
-            longest: false,
-            filter: Some(vec![]),
-            range: None,
-            audio: None,
-            audio_range: None,
-            capture: None,
-            lang: "auto".to_string(),
-        };
+        let mut args = default_overlay();
+        args.input = "videos/my_video.mp4".to_string();
+        args.output = None;
 
         args.check_output().unwrap();
         let out = args.output.unwrap();
@@ -548,44 +812,40 @@ mod tests {
     }
 
     #[test]
-    fn test_check_valid_opacity_rejected() {
-        let mut args = default_args();
-        args.opacity = 1.5;
-        assert!(args.check().is_err());
-
-        args.opacity = -0.1;
-        assert!(args.check().is_err());
+    fn test_check_output_requires_explicit_output_for_stdin() {
+        let mut args = default_overlay();
+        args.input = STDIN.to_string();
+        args.output = None;
+        assert!(args.check_output().is_err());
+        args.output = Some(STDOUT.to_string());
+        assert!(args.check_output().is_ok());
     }
 
     #[test]
-    fn test_check_valid_opacity_accepted() {
-        let args = default_args();
-        assert!(args.check().is_err()); // input doesn't exist
+    fn test_check_stdin_skips_file_checks() {
+        let mut args = default_overlay();
+        args.input = STDIN.to_string();
+        assert!(args.check().is_ok());
+    }
 
-        let mut args = default_args();
-        args.opacity = 0.0;
-        // will fail on file existence, so we only test opacity logic indirectly
-        assert!(args.check().is_err()); // not because of opacity
-
-        args.opacity = 1.0;
-        assert!(args.check().is_err()); // not because of opacity
+    #[test]
+    fn test_check_valid_opacity_rejected() {
+        let mut args = default_overlay();
+        args.render.opacity = 1.5;
+        assert!(args.check().is_err());
+        args.render.opacity = -0.1;
+        assert!(args.check().is_err());
     }
 
     #[test]
     fn test_check_encoder_valid() {
         for enc in &["auto", "nvenc", "amf", "qsv", "software"] {
-            let mut args = default_args();
-            args.encoder = enc.to_string();
-            // Will fail on file existence check first, but encoder validation would pass
-            // (we just verify no panic, as file check comes first)
+            let mut args = default_overlay();
+            args.render.encoder = enc.to_string();
             let _ = args.check();
         }
-    }
-
-    #[test]
-    fn test_check_encoder_invalid() {
-        let mut args = default_args();
-        args.encoder = "cuda".to_string();
+        let mut args = default_overlay();
+        args.render.encoder = "cuda".to_string();
         assert!(args.check().is_err());
     }
 
@@ -599,109 +859,112 @@ mod tests {
             "slow",
             "veryslow",
         ] {
-            let mut args = default_args();
-            args.x264_preset = preset.to_string();
+            let mut args = default_overlay();
+            args.render.x264_preset = preset.to_string();
             assert!(args.check().is_err()); // 文件存在性检查先失败，预设本身有效
         }
-        let mut args = default_args();
-        args.x264_preset = "bogus".to_string();
-        assert!(args.check().is_err());
-        // 预设校验在文件存在性之后，用一个存在的输入验证预设被接受
         let tmp = std::env::temp_dir().join("bili_add_on_preset_check.mp4");
         std::fs::write(&tmp, b"fake").unwrap();
-        let mut args = default_args();
+        let mut args = default_overlay();
         args.input = tmp.display().to_string();
-        args.x264_preset = "veryfast".to_string();
+        args.render.x264_preset = "veryfast".to_string();
         assert!(args.check().is_ok());
-        args.x264_preset = "bogus".to_string();
+        args.render.x264_preset = "bogus".to_string();
         assert!(args.check().is_err());
         std::fs::remove_file(&tmp).unwrap();
     }
 
     #[test]
     fn test_check_speed_zero_rejected() {
-        let mut args = default_args();
-        args.speed = 0;
+        let mut args = default_overlay();
+        args.render.speed = 0;
         assert!(args.check().is_err());
     }
 
     #[test]
     fn test_check_font_scale_non_positive_rejected() {
-        let mut args = default_args();
-        args.font_scale = 0.0;
+        let mut args = default_overlay();
+        args.render.font_scale = 0.0;
         assert!(args.check().is_err());
-
-        args.font_scale = -1.0;
+        args.render.font_scale = -1.0;
         assert!(args.check().is_err());
     }
 
     #[test]
-    fn test_clap_parse_repeatable_font_and_system_fonts() {
-        use clap::Parser;
-        let args = Args::try_parse_from([
-            "bili_add_on",
-            "--input",
-            "v.mp4",
-            "--bvid",
-            "BV1test",
-            "--font",
-            "a.ttf",
-            "--font",
-            "b.ttf",
-            "--system-fonts",
-        ])
-        .unwrap();
-        assert_eq!(args.font.len(), 2);
-        assert_eq!(args.font[0].to_string_lossy(), "a.ttf");
-        assert_eq!(args.font[1].to_string_lossy(), "b.ttf");
-        assert!(args.system_fonts);
+    fn test_check_rejects_missing_font_file() {
+        let tmp = std::env::temp_dir().join("bili_add_on_font_check.mp4");
+        std::fs::write(&tmp, b"fake").unwrap();
+        let mut args = default_overlay();
+        args.input = tmp.display().to_string();
+        args.render.font = vec![PathBuf::from("definitely_missing_font.ttf")];
+        assert!(args.check().is_err());
+        args.render.font = vec![std::env::temp_dir()];
+        assert!(args.check().is_err()); // 目录不允许
+        args.render.font = vec![];
+        assert!(args.check().is_ok());
+        std::fs::remove_file(&tmp).unwrap();
     }
 
     #[test]
-    fn test_clap_parse_lang() {
-        use clap::Parser;
-        for lang in ["zh", "en", "auto"] {
-            let args = Args::try_parse_from([
-                "bili_add_on",
-                "--input",
-                "v.mp4",
-                "--bvid",
-                "BV1test",
-                "--lang",
-                lang,
-            ])
-            .unwrap();
-            assert_eq!(args.lang, lang);
-        }
-        let args = Args::try_parse_from([
-            "bili_add_on",
-            "--input",
-            "v.mp4",
-            "--bvid",
-            "BV1test",
-            "--lang=zh",
-        ])
-        .unwrap();
-        assert_eq!(args.lang, "zh");
-        assert!(
-            Args::try_parse_from([
-                "bili_add_on",
-                "--input",
-                "v.mp4",
-                "--bvid",
-                "BV1test",
-                "--lang",
-                "fr",
-            ])
-            .is_err()
-        );
+    fn test_check_bottom_must_be_greater_than_top() {
+        let mut args = default_overlay();
+        args.render.top_ratio = 0.5;
+        args.render.bottom_ratio = 0.3;
+        assert!(args.check().is_err());
+    }
+
+    #[test]
+    fn test_check_range() {
+        let tmp = std::env::temp_dir().join("bili_add_on_range_test.mp4");
+        std::fs::write(&tmp, b"fake").unwrap();
+        let mut args = default_overlay();
+        args.input = tmp.display().to_string();
+        args.range = Some("1:23-5:00".to_string());
+        assert!(args.check().is_ok());
+        args.range = Some("162:12".to_string());
+        assert!(args.check().is_ok());
+        args.range = Some("10-5".to_string());
+        assert!(args.check().is_err());
+        std::fs::remove_file(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_check_audio_conflicts() {
+        let tmp = std::env::temp_dir().join("bili_add_on_audio_conflict.mp4");
+        std::fs::write(&tmp, b"fake").unwrap();
+        let mut args = default_overlay();
+        args.input = tmp.display().to_string();
+        args.render.audio = Some(PathBuf::from("audio.m4a"));
+        args.render.no_audio = true;
+        assert!(args.check().is_err());
+        args.render.audio = None;
+        args.render.audio_range = Some("5-10".to_string());
+        args.render.no_audio = true;
+        assert!(args.check().is_err());
+        args.render.no_audio = false;
+        assert!(args.check().is_ok());
+        std::fs::remove_file(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_check_capture_spec() {
+        let mut args = CaptureArgs {
+            capture: "gdigrab:".to_string(),
+            range: "30".to_string(),
+            output: "out.mp4".to_string(),
+            render: default_render(),
+        };
+        assert!(args.check().is_err()); // URL 为空
+        args.capture = "gdigrab:desktop".to_string();
+        assert!(args.check().is_ok());
     }
 
     #[test]
     fn test_parse_with_locale_returns_lang() {
-        let (args, lang) = Args::parse_with_locale_from(
+        let (cli, lang) = Cli::parse_with_locale_from(
             [
                 "bili_add_on",
+                "overlay",
                 "--input",
                 "v.mp4",
                 "--bvid",
@@ -713,11 +976,15 @@ mod tests {
             .map(String::from),
         )
         .unwrap();
+        let Commands::Overlay(args) = cli.command else {
+            panic!("expected overlay");
+        };
         assert_eq!(args.input, "v.mp4");
         assert_eq!(lang, crate::i18n::Lang::En);
-        let (_, lang) = Args::parse_with_locale_from(
+        let (_, lang) = Cli::parse_with_locale_from(
             [
                 "bili_add_on",
+                "overlay",
                 "--input",
                 "v.mp4",
                 "--bvid",
@@ -730,44 +997,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(lang, crate::i18n::Lang::Zh);
-    }
-
-    #[test]
-    fn test_check_rejects_missing_font_file() {
-        let tmp = std::env::temp_dir().join("bili_add_on_font_check.mp4");
-        std::fs::write(&tmp, b"fake").unwrap();
-        let mut args = default_args();
-        args.input = tmp.display().to_string();
-        args.font = vec![PathBuf::from("definitely_missing_font.ttf")];
-        assert!(args.check().is_err());
-        args.font = vec![std::env::temp_dir()];
-        assert!(args.check().is_err()); // 目录不允许
-        args.font = vec![];
-        assert!(args.check().is_ok());
-        std::fs::remove_file(&tmp).unwrap();
-    }
-
-    #[test]
-    fn test_check_bottom_must_be_greater_than_top() {
-        let mut args = default_args();
-        args.top_ratio = 0.5;
-        args.bottom_ratio = 0.3;
-        assert!(args.check().is_err());
-    }
-
-    #[test]
-    fn test_clap_parse_basic() {
-        use clap::Parser;
-        let args =
-            Args::try_parse_from(["bili_add_on", "--input", "video.mp4", "--bvid", "BV1test"]);
-        assert!(args.is_ok());
-    }
-
-    #[test]
-    fn test_clap_parse_requires_source() {
-        use clap::Parser;
-        let args = Args::try_parse_from(["bili_add_on", "--input", "video.mp4"]);
-        assert!(args.is_err());
     }
 
     #[test]
@@ -836,153 +1065,10 @@ mod tests {
     }
 
     #[test]
-    fn test_check_rejects_invalid_range() {
-        let mut args = default_args();
-        args.range = Some("10-5".to_string());
-        assert!(args.check().is_err());
-        args.range = Some("1:2:3:4-5".to_string());
-        assert!(args.check().is_err());
-    }
-
-    #[test]
-    fn test_check_accepts_valid_range() {
-        let tmp = std::env::temp_dir().join("bili_add_on_range_test.mp4");
-        std::fs::write(&tmp, b"fake").unwrap();
-        let mut args = default_args();
-        args.input = tmp.display().to_string();
-        args.range = Some("1:23-5:00".to_string());
-        assert!(args.check().is_ok());
-        args.range = Some("162:12".to_string());
-        assert!(args.check().is_ok());
-        std::fs::remove_file(&tmp).unwrap();
-    }
-
-    #[test]
-    fn test_clap_parse_stdin_stdout() {
-        use clap::Parser;
-        let args = Args::try_parse_from([
-            "bili_add_on",
-            "--input",
-            STDIN,
-            "--output",
-            STDOUT,
-            "--bvid",
-            "BV1test",
-        ])
-        .unwrap();
-        assert_eq!(args.input, STDIN);
-        assert_eq!(args.output.as_deref(), Some(STDOUT));
-    }
-
-    #[test]
-    fn test_check_stdin_skips_file_checks() {
-        let mut args = default_args();
-        args.input = STDIN.to_string();
-        assert!(args.check().is_ok());
-    }
-
-    #[test]
-    fn test_check_output_requires_explicit_output_for_stdin() {
-        let mut args = default_args();
-        args.input = STDIN.to_string();
-        args.output = None;
-        assert!(args.check_output().is_err());
-
-        args.output = Some(STDOUT.to_string());
-        assert!(args.check_output().is_ok());
-    }
-
-    #[test]
-    fn test_check_audio_file_validation() {
-        let mut args = default_args();
-        args.audio = Some(PathBuf::from("definitely_missing_audio.m4a"));
-        assert!(args.check().is_err());
-        args.audio = Some(std::env::temp_dir());
-        assert!(args.check().is_err());
-    }
-
-    #[test]
-    fn test_check_audio_conflicts() {
-        let mut args = default_args();
-        args.audio = Some(PathBuf::from("audio.m4a"));
-        args.no_audio = true;
-        assert!(args.check().is_err());
-
-        let mut args = default_args();
-        args.audio_range = Some("5-10".to_string());
-        args.no_audio = true;
-        assert!(args.check().is_err());
-    }
-
-    #[test]
-    fn test_check_audio_range_with_stdin_is_warn_only() {
-        let mut args = default_args();
-        args.input = STDIN.to_string();
-        args.audio_range = Some("5-10".to_string());
-        assert!(args.check().is_ok());
-        args.audio_range = Some("10-5".to_string());
-        assert!(args.check().is_err());
-    }
-
-    #[test]
-    fn test_check_device_requires_capture_and_range() {
-        let mut args = default_args();
-        args.input = DEVICE.to_string();
-        assert!(args.check().is_err()); // 缺少 --capture
-
-        args.capture = Some("gdigrab:desktop".to_string());
-        assert!(args.check().is_err()); // 缺少 --range
-
-        args.range = Some("30".to_string());
-        assert!(args.check().is_ok());
-
-        args.range = Some("1:23".to_string());
-        assert!(args.check().is_ok());
-
-        args.range = Some("5-30".to_string());
-        assert!(args.check().is_err()); // 不允许起始时间
-
-        args.range = Some("30".to_string());
-        args.capture = Some("gdigrab:".to_string());
-        assert!(args.check().is_err()); // URL 为空
-    }
-
-    #[test]
-    fn test_check_capture_requires_device_input() {
-        let mut args = default_args();
-        args.capture = Some("gdigrab:desktop".to_string());
-        assert!(args.check().is_err());
-    }
-
-    #[test]
-    fn test_clap_parse_device() {
-        use clap::Parser;
-        let args = Args::try_parse_from([
-            "bili_add_on",
-            "--input",
-            DEVICE,
-            "--output",
-            "out.mp4",
-            "--capture",
-            "dshow:video=USB Camera",
-            "--range",
-            "30",
-            "--bvid",
-            "BV1test",
-        ])
-        .unwrap();
-        assert_eq!(args.input, DEVICE);
-        assert_eq!(args.capture.as_deref(), Some("dshow:video=USB Camera"));
-        assert_eq!(args.range.as_deref(), Some("30"));
-    }
-
-    #[test]
-    fn test_check_output_requires_explicit_output_for_device() {
-        let mut args = default_args();
-        args.input = DEVICE.to_string();
-        args.output = None;
-        assert!(args.check_output().is_err());
-        args.output = Some("out.mp4".to_string());
-        assert!(args.check_output().is_ok());
+    fn test_parse_capture_range_rejects_start() {
+        assert!(parse_capture_range("30").is_ok());
+        assert!(parse_capture_range("1:23").is_ok());
+        assert!(parse_capture_range("5-30").is_err());
+        assert!(parse_capture_range("abc").is_err());
     }
 }

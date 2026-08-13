@@ -18,7 +18,7 @@ use crate::{
     encoder::FfmpegEncoder,
     fonts::FontStack,
     i18n::Lang,
-    interaction::Args,
+    interaction::RenderOptions,
     layout::{
         Direction, DrawParams, NormalComponent, compute_max_danmaku_deadline, compute_n_rails,
         del_dead, draw_fixed_danmakus, draw_scroll_danmakus, scroll,
@@ -32,7 +32,7 @@ pub(crate) fn video_process(
     mut decoder: VideoDecoder,
     mut encoder: FfmpegEncoder,
     mut danmakus: Vec<Danmaku>,
-    args: &Args,
+    args: &RenderOptions,
     frame_duration_secs: f64,
     range: Option<(f64, f64)>,
     lang: Lang,

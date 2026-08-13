@@ -389,6 +389,62 @@ impl VideoDecoder {
 
 unsafe impl Send for VideoDecoder {}
 
+/// 列出指定采集格式的可用设备（模拟 `ffmpeg -list_devices true -f <格式> -i dummy`）。
+///
+/// 支持 `dshow` / `avfoundation`：设备列表由解复用器通过 `av_log`（INFO 级）打印到 stderr，
+/// 打开动作预期失败，列表打印后正常返回。`gdigrab` / `x11grab` / `v4l2` 无设备列表，
+/// 打印使用提示。
+pub fn list_devices(format: &str) -> Result<()> {
+    match format {
+        "gdigrab" | "x11grab" => {
+            eprintln!(
+                "{format} 无设备列表：屏幕捕获直接指定 URL，如 gdigrab:desktop（窗口捕获可用 gdigrab:窗口标题）"
+            );
+            return Ok(());
+        }
+        "v4l2" => {
+            eprintln!(
+                "v4l2 无设备列表：请使用 v4l2-ctl --list-devices，或直接指定设备路径（如 /dev/video0）"
+            );
+            return Ok(());
+        }
+        "dshow" | "avfoundation" => {}
+        other => bail!("不支持的格式: {other}（--list-devices 支持 dshow/avfoundation）"),
+    }
+
+    // 设备解复用器（dshow/gdigrab/avfoundation 等）由 avdevice_register_all 注册，
+    // 必须先 init 才能被 av_find_input_format 找到。
+    ffmpeg_next::init()
+        .map_err(|e| anyhow!("{e}"))
+        .context("视频编解码器初始化失败，请确认 ffmpeg 已正确安装且版本兼容")?;
+
+    let c_name = std::ffi::CString::new(format)
+        .map_err(|_| anyhow!("输入格式名包含非法字符: {format}"))?;
+    let fmt_ptr = unsafe { ffmpeg::ffi::av_find_input_format(c_name.as_ptr()) };
+    if fmt_ptr.is_null() {
+        bail!("找不到输入格式: {format}（请确认 ffmpeg 编译包含该格式）");
+    }
+    let input_fmt = unsafe { ffmpeg::format::format::Input::wrap(fmt_ptr as *mut _) };
+
+    let url = if format == "avfoundation" { "" } else { "dummy" };
+    let mut opts = ffmpeg::Dictionary::new();
+    opts.set("list_devices", "true");
+
+    unsafe {
+        // 设备列表通过 av_log(INFO) 输出，临时提高日志级别，结束后恢复。
+        let prev = ffmpeg::ffi::av_log_get_level();
+        ffmpeg::ffi::av_log_set_level(ffmpeg::ffi::AV_LOG_INFO);
+        // 该打开动作预期失败（列表已打印），结果忽略。
+        let _ = ffmpeg::format::open_with(
+            Path::new(url),
+            &ffmpeg::Format::Input(input_fmt),
+            opts,
+        );
+        ffmpeg::ffi::av_log_set_level(prev);
+    }
+    Ok(())
+}
+
 fn avframe_rgb24_to_image(
     frame: &ffmpeg::util::frame::video::Video,
     image: &mut RgbImage,

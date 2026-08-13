@@ -6,7 +6,7 @@ use image::{RgbImage, RgbaImage};
 use crate::{
     danmaku::{Danmaku, DanmakuMode},
     fonts::FontStack,
-    interaction::Args,
+    interaction::RenderOptions,
     utils::{GrowableVec, blit_cached_text},
 };
 
@@ -14,7 +14,7 @@ use crate::{
 pub(crate) fn compute_max_danmaku_deadline(
     danmakus: &[Danmaku],
     fonts: &mut FontStack,
-    args: &Args,
+    args: &RenderOptions,
     video_width: u32,
     frame_duration_secs: f64,
 ) -> f64 {
