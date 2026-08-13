@@ -53,9 +53,15 @@ fn test_cli_full_args_parsing() {
 
 #[test]
 fn test_cli_default_values() {
-    let cli =
-        Cli::try_parse_from(["bili_add_on", "overlay", "--input", "video.mp4", "--bvid", "BV1test"])
-            .unwrap();
+    let cli = Cli::try_parse_from([
+        "bili_add_on",
+        "overlay",
+        "--input",
+        "video.mp4",
+        "--bvid",
+        "BV1test",
+    ])
+    .unwrap();
 
     let Commands::Overlay(args) = cli.command else {
         panic!("expected overlay");
@@ -88,7 +94,10 @@ fn test_cli_xml_source() {
     let Commands::Overlay(args) = cli.command else {
         panic!("expected overlay");
     };
-    assert_eq!(args.render.source.xml.unwrap().to_string_lossy(), "danmaku.xml");
+    assert_eq!(
+        args.render.source.xml.unwrap().to_string_lossy(),
+        "danmaku.xml"
+    );
     assert!(args.render.source.bvid.is_none());
 }
 
@@ -157,7 +166,10 @@ fn test_cli_stdin_stdout_special_values() {
         panic!("expected overlay");
     };
     assert_eq!(args.input, bili_add_on::interaction::STDIN);
-    assert_eq!(args.output.as_deref(), Some(bili_add_on::interaction::STDOUT));
+    assert_eq!(
+        args.output.as_deref(),
+        Some(bili_add_on::interaction::STDOUT)
+    );
 }
 
 #[test]
@@ -201,9 +213,7 @@ fn test_cli_parse_fails_missing_source() {
 #[test]
 fn test_cli_parse_fails_missing_subcommand() {
     assert!(Cli::try_parse_from(["bili_add_on"]).is_err());
-    assert!(
-        Cli::try_parse_from(["bili_add_on", "overlay", "--bvid", "BV1test"]).is_err()
-    );
+    assert!(Cli::try_parse_from(["bili_add_on", "overlay", "--bvid", "BV1test"]).is_err());
 }
 
 #[test]

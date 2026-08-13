@@ -6,9 +6,9 @@ use std::{
 };
 
 use anyhow::{Context, anyhow, bail};
+use ffmpeg_next as ffmpeg;
 #[cfg(not(feature = "dhat-heap"))]
 use mimalloc::MiMalloc;
-use ffmpeg_next as ffmpeg;
 
 use crate::{
     core::video_process,
@@ -244,9 +244,8 @@ fn run_render(
             if let Some(fmt) = spec.input_format() {
                 let _ = decoder::list_devices(fmt);
             }
-            return Err(e).with_context(|| {
-                format!("视频解码器创建失败，无法解码源: {}", spec.display())
-            });
+            return Err(e)
+                .with_context(|| format!("视频解码器创建失败，无法解码源: {}", spec.display()));
         }
     };
 
@@ -302,8 +301,7 @@ fn run_render(
     let audio_source: Option<PathBuf> = if render.no_audio {
         None
     } else if let Some(p) = &render.audio {
-        if !audio::has_audio(p)
-            .with_context(|| format!("无法检测音频源文件: {}", p.display()))?
+        if !audio::has_audio(p).with_context(|| format!("无法检测音频源文件: {}", p.display()))?
         {
             bail!("音频源文件中没有音频流: {}", p.display());
         }
@@ -419,17 +417,15 @@ fn device_input_spec(spec: &str) -> anyhow::Result<(String, String)> {
             "windows" => ("desktop".to_string(), "gdigrab".to_string()),
             "linux" => (":0.0".to_string(), "x11grab".to_string()),
             "macos" => ("1:none".to_string(), "avfoundation".to_string()),
-            _ => bail!(
-                "当前平台 ({os}) 不支持默认屏幕捕获，请显式指定 --capture {{格式}}:{{URL}}"
-            ),
+            _ => bail!("当前平台 ({os}) 不支持默认屏幕捕获，请显式指定 --capture {{格式}}:{{URL}}"),
         }),
         name => Ok(match os {
             "windows" => (format!("video={name}"), "dshow".to_string()),
             "linux" => (name.to_string(), "v4l2".to_string()),
             "macos" => (name.to_string(), "avfoundation".to_string()),
-            _ => bail!(
-                "当前平台 ({os}) 不支持默认摄像头捕获，请显式指定 --capture {{格式}}:{{URL}}"
-            ),
+            _ => {
+                bail!("当前平台 ({os}) 不支持默认摄像头捕获，请显式指定 --capture {{格式}}:{{URL}}")
+            }
         }),
     }
 }

@@ -418,15 +418,19 @@ pub fn list_devices(format: &str) -> Result<()> {
         .map_err(|e| anyhow!("{e}"))
         .context("视频编解码器初始化失败，请确认 ffmpeg 已正确安装且版本兼容")?;
 
-    let c_name = std::ffi::CString::new(format)
-        .map_err(|_| anyhow!("输入格式名包含非法字符: {format}"))?;
+    let c_name =
+        std::ffi::CString::new(format).map_err(|_| anyhow!("输入格式名包含非法字符: {format}"))?;
     let fmt_ptr = unsafe { ffmpeg::ffi::av_find_input_format(c_name.as_ptr()) };
     if fmt_ptr.is_null() {
         bail!("找不到输入格式: {format}（请确认 ffmpeg 编译包含该格式）");
     }
     let input_fmt = unsafe { ffmpeg::format::format::Input::wrap(fmt_ptr as *mut _) };
 
-    let url = if format == "avfoundation" { "" } else { "dummy" };
+    let url = if format == "avfoundation" {
+        ""
+    } else {
+        "dummy"
+    };
     let mut opts = ffmpeg::Dictionary::new();
     opts.set("list_devices", "true");
 
@@ -435,11 +439,7 @@ pub fn list_devices(format: &str) -> Result<()> {
         let prev = ffmpeg::ffi::av_log_get_level();
         ffmpeg::ffi::av_log_set_level(ffmpeg::ffi::AV_LOG_INFO);
         // 该打开动作预期失败（列表已打印），结果忽略。
-        let _ = ffmpeg::format::open_with(
-            Path::new(url),
-            &ffmpeg::Format::Input(input_fmt),
-            opts,
-        );
+        let _ = ffmpeg::format::open_with(Path::new(url), &ffmpeg::Format::Input(input_fmt), opts);
         ffmpeg::ffi::av_log_set_level(prev);
     }
     Ok(())

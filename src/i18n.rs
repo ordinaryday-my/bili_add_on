@@ -24,11 +24,7 @@ const BILINGUAL: &[(&str, &str, &str)] = &[
         "Merging audio tracks...",
     ),
     ("output_file", "输出文件: {}", "Output file: {}"),
-    (
-        "output_stdout",
-        "已输出到标准输出",
-        "Written to stdout",
-    ),
+    ("output_stdout", "已输出到标准输出", "Written to stdout"),
     ("done_in", "完成，总用时 {} 秒", "Done in {} seconds"),
     (
         "render_progress",

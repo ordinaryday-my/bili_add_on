@@ -39,11 +39,7 @@ pub enum Commands {
 
 #[derive(clap::Args, Debug)]
 pub struct OverlayArgs {
-    #[arg(
-        long,
-        short,
-        help = "输入视频文件路径，或 :STDIN: 从标准输入读取"
-    )]
+    #[arg(long, short, help = "输入视频文件路径，或 :STDIN: 从标准输入读取")]
     pub input: String,
 
     #[arg(
@@ -648,20 +644,20 @@ mod tests {
 
     #[test]
     fn test_clap_parse_requires_source() {
+        assert!(Cli::try_parse_from(["bili_add_on", "overlay", "--input", "video.mp4"]).is_err());
         assert!(
-            Cli::try_parse_from(["bili_add_on", "overlay", "--input", "video.mp4"]).is_err()
+            Cli::try_parse_from([
+                "bili_add_on",
+                "capture",
+                "--capture",
+                "gdigrab:desktop",
+                "--range",
+                "30",
+                "--output",
+                "out.mp4"
+            ])
+            .is_err()
         );
-        assert!(Cli::try_parse_from([
-            "bili_add_on",
-            "capture",
-            "--capture",
-            "gdigrab:desktop",
-            "--range",
-            "30",
-            "--output",
-            "out.mp4"
-        ])
-        .is_err());
     }
 
     #[test]
@@ -683,85 +679,97 @@ mod tests {
         assert!(args.render.system_fonts);
         assert_eq!(args.render.lang, "zh");
 
-        assert!(Cli::try_parse_from([
-            "bili_add_on",
-            "overlay",
-            "--input",
-            "v.mp4",
-            "--bvid",
-            "BV1test",
-            "--lang",
-            "fr"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "bili_add_on",
+                "overlay",
+                "--input",
+                "v.mp4",
+                "--bvid",
+                "BV1test",
+                "--lang",
+                "fr"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
     fn test_cli_parse_capture_required() {
         // 缺少 --range
-        assert!(Cli::try_parse_from([
-            "bili_add_on",
-            "capture",
-            "--capture",
-            "gdigrab:desktop",
-            "--output",
-            "out.mp4",
-            "--bvid",
-            "BV1test"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "bili_add_on",
+                "capture",
+                "--capture",
+                "gdigrab:desktop",
+                "--output",
+                "out.mp4",
+                "--bvid",
+                "BV1test"
+            ])
+            .is_err()
+        );
         // 缺少 --capture
-        assert!(Cli::try_parse_from([
-            "bili_add_on",
-            "capture",
-            "--range",
-            "30",
-            "--output",
-            "out.mp4",
-            "--bvid",
-            "BV1test"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "bili_add_on",
+                "capture",
+                "--range",
+                "30",
+                "--output",
+                "out.mp4",
+                "--bvid",
+                "BV1test"
+            ])
+            .is_err()
+        );
         // 缺少 --output
-        assert!(Cli::try_parse_from([
-            "bili_add_on",
-            "capture",
-            "--capture",
-            "gdigrab:desktop",
-            "--range",
-            "30",
-            "--bvid",
-            "BV1test"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "bili_add_on",
+                "capture",
+                "--capture",
+                "gdigrab:desktop",
+                "--range",
+                "30",
+                "--bvid",
+                "BV1test"
+            ])
+            .is_err()
+        );
         // --range 不允许起始时间
-        assert!(Cli::try_parse_from([
-            "bili_add_on",
-            "capture",
-            "--capture",
-            "gdigrab:desktop",
-            "--range",
-            "5-30",
-            "--output",
-            "out.mp4",
-            "--bvid",
-            "BV1test"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "bili_add_on",
+                "capture",
+                "--capture",
+                "gdigrab:desktop",
+                "--range",
+                "5-30",
+                "--output",
+                "out.mp4",
+                "--bvid",
+                "BV1test"
+            ])
+            .is_err()
+        );
         // --range 语法错误
-        assert!(Cli::try_parse_from([
-            "bili_add_on",
-            "capture",
-            "--capture",
-            "gdigrab:desktop",
-            "--range",
-            "abc",
-            "--output",
-            "out.mp4",
-            "--bvid",
-            "BV1test"
-        ])
-        .is_err());
+        assert!(
+            Cli::try_parse_from([
+                "bili_add_on",
+                "capture",
+                "--capture",
+                "gdigrab:desktop",
+                "--range",
+                "abc",
+                "--output",
+                "out.mp4",
+                "--bvid",
+                "BV1test"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
