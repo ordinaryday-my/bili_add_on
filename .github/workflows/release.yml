@@ -47,7 +47,7 @@ jobs:
           fi
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bili_add_on-${{ matrix.target }}
           path: target/release/bili_add_on-${{ matrix.target }}*
