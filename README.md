@@ -8,7 +8,20 @@
 
 - [ffmpeg](https://ffmpeg.org/) — 视频编解码必须，请确保已安装并在 PATH 中可用
 
+> 从 [GitHub Releases](https://github.com/ordinaryday-my/bili_add_on/releases) 下载的 `-with-ffmpeg` 版本已附带 ffmpeg 动态库，**无需单独安装 ffmpeg**。
+
 ## 安装
+
+### 从 GitHub Releases 下载
+
+每个发布版本提供两种产物：
+
+| 产物 | 说明 |
+|------|------|
+| `bili_add_on-<平台>` | 单文件二进制，需自行安装 ffmpeg 并加入 PATH |
+| `bili_add_on-<平台>-with-ffmpeg.zip` | 附带 ffmpeg 动态库（Windows 为 dll，Linux/macOS 为 `libs/` 目录下的 so/dylib），解压后即可直接运行 |
+
+### 从源码编译
 
 ```bash
 cargo build --release

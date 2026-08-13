@@ -8,7 +8,20 @@ A command-line tool to overlay Bilibili danmaku (bullet comments) onto videos. I
 
 - [ffmpeg](https://ffmpeg.org/) — required for video encoding/decoding. Make sure it is installed and available in PATH.
 
+> The `-with-ffmpeg` release artifacts from [GitHub Releases](https://github.com/ordinaryday-my/bili_add_on/releases) bundle the FFmpeg shared libraries, so **no separate FFmpeg installation is needed**.
+
 ## Installation
+
+### Download from GitHub Releases
+
+Each release ships two kinds of artifacts:
+
+| Artifact | Description |
+|----------|-------------|
+| `bili_add_on-<platform>` | Standalone binary; requires FFmpeg installed and on PATH |
+| `bili_add_on-<platform>-with-ffmpeg.zip` | Bundles the FFmpeg shared libraries (DLLs on Windows, `libs/` directory with .so/.dylib on Linux/macOS); run directly after extraction |
+
+### Build from source
 
 ```bash
 cargo build --release

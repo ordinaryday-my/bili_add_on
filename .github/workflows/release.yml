@@ -46,11 +46,119 @@ jobs:
             mv target/release/bili_add_on "target/release/bili_add_on-${{ matrix.target }}"
           fi
 
+      - name: Prepare staging dir for ffmpeg bundle
+        shell: bash
+        run: |
+          mkdir -p dist-ffmpeg/libs
+          if [ -f "target/release/bili_add_on-${{ matrix.target }}.exe" ]; then
+            cp "target/release/bili_add_on-${{ matrix.target }}.exe" dist-ffmpeg/bili_add_on.exe
+          else
+            cp "target/release/bili_add_on-${{ matrix.target }}" dist-ffmpeg/bili_add_on
+          fi
+
+      - name: Bundle FFmpeg DLLs (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item "$env:FFMPEG_DIR\bin\*.dll" -Destination dist-ffmpeg\
+          Get-ChildItem -LiteralPath "$env:FFMPEG_DIR\bin" -Filter "LICENSE*" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination dist-ffmpeg\
+          }
+
+      - name: Bundle FFmpeg shared libs (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/ffmpeg-deps.txt
+          ldd dist-ffmpeg/bili_add_on | awk '/=> \/.*\.so/{print $3}' >> /tmp/ffmpeg-deps.txt
+          for _ in 1 2 3 4 5 6 7 8; do
+            sort -u /tmp/ffmpeg-deps.txt > /tmp/ffmpeg-deps.sorted
+            before=$(wc -l < /tmp/ffmpeg-deps.sorted)
+            while read -r lib; do
+              cp -L "$lib" dist-ffmpeg/libs/ 2>/dev/null || true
+            done < /tmp/ffmpeg-deps.sorted
+            for lib in dist-ffmpeg/libs/*; do
+              [ -f "$lib" ] || continue
+              ldd "$lib" | awk '/=> \/.*\.so/{print $3}' >> /tmp/ffmpeg-deps.txt
+            done
+            sort -u /tmp/ffmpeg-deps.txt > /tmp/ffmpeg-deps.sorted
+            after=$(wc -l < /tmp/ffmpeg-deps.sorted)
+            if [ "$before" -eq "$after" ]; then break; fi
+          done
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq patchelf
+          patchelf --set-rpath '$ORIGIN/libs' dist-ffmpeg/bili_add_on
+
+      - name: Bundle FFmpeg dylibs (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > /tmp/ffmpeg-deps.txt
+          collect_deps() {
+            otool -L "$1" | awk '/\/opt\/homebrew\//{print $1}' >> /tmp/ffmpeg-deps.txt
+          }
+          collect_deps dist-ffmpeg/bili_add_on
+          for _ in 1 2 3 4 5 6 7 8; do
+            sort -u /tmp/ffmpeg-deps.txt > /tmp/ffmpeg-deps.sorted
+            before=$(wc -l < /tmp/ffmpeg-deps.sorted)
+            while read -r lib; do
+              [ -n "$lib" ] && cp -L "$lib" dist-ffmpeg/libs/ 2>/dev/null || true
+            done < /tmp/ffmpeg-deps.sorted
+            for lib in dist-ffmpeg/libs/*; do
+              [ -f "$lib" ] || continue
+              collect_deps "$lib"
+            done
+            sort -u /tmp/ffmpeg-deps.txt > /tmp/ffmpeg-deps.sorted
+            after=$(wc -l < /tmp/ffmpeg-deps.sorted)
+            if [ "$before" -eq "$after" ]; then break; fi
+          done
+          for lib in dist-ffmpeg/libs/*.dylib; do
+            [ -f "$lib" ] || continue
+            name=$(basename "$lib")
+            install_name_tool -id "@executable_path/libs/$name" "$lib"
+            for dep in $(otool -L "$lib" | awk '/\/opt\/homebrew\//{print $1}'); do
+              install_name_tool -change "$dep" "@executable_path/libs/$(basename "$dep")" "$lib"
+            done
+          done
+          for dep in $(otool -L dist-ffmpeg/bili_add_on | awk '/\/opt\/homebrew\//{print $1}'); do
+            install_name_tool -change "$dep" "@executable_path/libs/$(basename "$dep")" dist-ffmpeg/bili_add_on
+          done
+          codesign --force --sign - dist-ffmpeg/bili_add_on dist-ffmpeg/libs/*.dylib
+
+      - name: Create ffmpeg bundle zip (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist-ffmpeg\* -DestinationPath "target\release\bili_add_on-${{ matrix.target }}-with-ffmpeg.zip" -CompressionLevel Optimal
+
+      - name: Create ffmpeg bundle zip (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          (cd dist-ffmpeg && python3 -m zipfile -c "../target/release/bili_add_on-${{ matrix.target }}-with-ffmpeg.zip" .)
+
+      - name: Create ffmpeg bundle zip (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          (cd dist-ffmpeg && tar -a -c -f "../target/release/bili_add_on-${{ matrix.target }}-with-ffmpeg.zip" .)
+
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: bili_add_on-${{ matrix.target }}
-          path: target/release/bili_add_on-${{ matrix.target }}*
+          path: |
+            target/release/bili_add_on-${{ matrix.target }}.exe
+            target/release/bili_add_on-${{ matrix.target }}
+          if-no-files-found: error
+
+      - name: Upload ffmpeg-bundled artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: bili_add_on-${{ matrix.target }}-with-ffmpeg
+          path: target/release/bili_add_on-${{ matrix.target }}-with-ffmpeg.zip
           if-no-files-found: error
 
   publish:
