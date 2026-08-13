@@ -1,22 +1,35 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{CommandFactory, FromArgMatches, Parser};
 use regex::Regex;
-use std::{cmp::Ordering, ffi::OsString, path::PathBuf};
+use std::{
+    cmp::Ordering,
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use crate::i18n::Lang;
+
+/// `--input` 特殊值：从标准输入读取视频。
+pub const STDIN: &str = ":STDIN:";
+/// `--output` 特殊值：将视频写入标准输出。
+pub const STDOUT: &str = ":STDOUT:";
 
 #[derive(Debug, Parser)]
 #[command(version, author, about)]
 pub struct Args {
-    #[arg(long, short, help = "输入视频文件路径")]
-    pub input: PathBuf,
+    #[arg(
+        long,
+        short,
+        help = "输入视频文件路径，或 :STDIN: 从标准输入读取"
+    )]
+    pub input: String,
 
     #[arg(
         long,
         short,
-        help = "输出视频路径（默认在源文件名前添加 bili_add_on_ 前缀）"
+        help = "输出视频路径，或 :STDOUT: 输出到标准输出（默认在源文件名前添加 bili_add_on_ 前缀）"
     )]
-    pub output: Option<PathBuf>,
+    pub output: Option<String>,
 
     #[command(flatten)]
     pub source: DanmakuSource,
@@ -116,6 +129,20 @@ pub struct Args {
 
     #[arg(
         long,
+        value_name = "AUDIO_FILE",
+        help = "音频源文件路径，覆盖视频自带音频（stdin 输入时可用此参数保留音频）"
+    )]
+    pub audio: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "TIME_RANGE",
+        help = "音频裁剪时段：{起始}-{结束} 或 {结束}；先按此裁剪音频并对齐视频开头，再随视频一起按 --range 裁剪"
+    )]
+    pub audio_range: Option<String>,
+
+    #[arg(
+        long,
         value_name = "LANG",
         default_value = "auto",
         value_parser = ["zh", "en", "auto"],
@@ -146,12 +173,14 @@ impl Args {
         Ok((args, lang))
     }
     pub fn check(&self) -> anyhow::Result<()> {
-        if !self.input.exists() {
-            bail!("视频源不存在: {}", self.input.display());
-        }
+        if self.input != STDIN {
+            if !Path::new(&self.input).exists() {
+                bail!("视频源不存在: {}", self.input);
+            }
 
-        if self.input.is_dir() {
-            bail!("不能输入目录（视频源）: {}", self.input.display());
+            if Path::new(&self.input).is_dir() {
+                bail!("不能输入目录（视频源）: {}", self.input);
+            }
         }
 
         if let Some(p) = &self.source.xml {
@@ -257,20 +286,43 @@ impl Args {
             parse_time_range(range)?;
         }
 
+        if let Some(path) = &self.audio {
+            if !path.exists() {
+                bail!("音频文件不存在: {}", path.display());
+            }
+            if path.is_dir() {
+                bail!("不能输入目录（音频源）: {}", path.display());
+            }
+        }
+
+        if self.audio.is_some() && self.no_audio {
+            bail!("--audio 与 --no-audio 冲突，请二选一");
+        }
+
+        if let Some(audio_range) = &self.audio_range {
+            parse_time_range(audio_range)?;
+            if self.no_audio {
+                bail!("--audio-range 与 --no-audio 冲突，无法使用");
+            }
+        }
+
         Ok(())
     }
 
     pub fn check_output(&mut self) -> anyhow::Result<()> {
         if self.output.is_none() {
-            let mut from = self.input.clone();
+            if self.input == STDIN {
+                bail!("使用 stdin 输入时必须显式指定 --output（文件路径或 :STDOUT:）");
+            }
+            let mut from = PathBuf::from(&self.input);
             let mut prefix = OsString::from("bili_add_on_");
             prefix.push(
                 from.file_name()
-                    .with_context(|| format!("无法从路径获取文件名: {}", self.input.display()))?,
+                    .with_context(|| format!("无法从路径获取文件名: {}", self.input))?,
             );
             from.set_file_name(prefix);
 
-            self.output = Some(from);
+            self.output = Some(from.to_string_lossy().into_owned());
         }
 
         Ok(())
@@ -389,8 +441,8 @@ mod tests {
 
     fn default_args() -> Args {
         Args {
-            input: PathBuf::from("test.mp4"),
-            output: Some(PathBuf::from("output.mp4")),
+            input: "test.mp4".to_string(),
+            output: Some("output.mp4".to_string()),
             source: DanmakuSource {
                 bvid: Some("BV1test".to_string()),
                 xml: None,
@@ -412,6 +464,8 @@ mod tests {
             longest: false,
             filter: Some(vec![]),
             range: None,
+            audio: None,
+            audio_range: None,
             lang: "auto".to_string(),
         }
     }
@@ -419,7 +473,7 @@ mod tests {
     #[test]
     fn test_check_output_generates_default_path() {
         let mut args = Args {
-            input: PathBuf::from("videos").join("my_video.mp4"),
+            input: "videos/my_video.mp4".to_string(),
             output: None,
             source: DanmakuSource {
                 bvid: Some("BV1test".to_string()),
@@ -442,13 +496,15 @@ mod tests {
             longest: false,
             filter: Some(vec![]),
             range: None,
+            audio: None,
+            audio_range: None,
             lang: "auto".to_string(),
         };
 
         args.check_output().unwrap();
         let out = args.output.unwrap();
         assert_eq!(
-            out.file_name().unwrap().to_string_lossy(),
+            PathBuf::from(out).file_name().unwrap().to_string_lossy(),
             "bili_add_on_my_video.mp4"
         );
     }
@@ -510,13 +566,13 @@ mod tests {
             assert!(args.check().is_err()); // 文件存在性检查先失败，预设本身有效
         }
         let mut args = default_args();
-        args.x264_preset = "invalid".to_string();
+        args.x264_preset = "bogus".to_string();
         assert!(args.check().is_err());
         // 预设校验在文件存在性之后，用一个存在的输入验证预设被接受
         let tmp = std::env::temp_dir().join("bili_add_on_preset_check.mp4");
         std::fs::write(&tmp, b"fake").unwrap();
         let mut args = default_args();
-        args.input = tmp.clone();
+        args.input = tmp.display().to_string();
         args.x264_preset = "veryfast".to_string();
         assert!(args.check().is_ok());
         args.x264_preset = "bogus".to_string();
@@ -619,7 +675,7 @@ mod tests {
             .map(String::from),
         )
         .unwrap();
-        assert_eq!(args.input.to_string_lossy(), "v.mp4");
+        assert_eq!(args.input, "v.mp4");
         assert_eq!(lang, crate::i18n::Lang::En);
         let (_, lang) = Args::parse_with_locale_from(
             [
@@ -643,7 +699,7 @@ mod tests {
         let tmp = std::env::temp_dir().join("bili_add_on_font_check.mp4");
         std::fs::write(&tmp, b"fake").unwrap();
         let mut args = default_args();
-        args.input = tmp.clone();
+        args.input = tmp.display().to_string();
         args.font = vec![PathBuf::from("definitely_missing_font.ttf")];
         assert!(args.check().is_err());
         args.font = vec![std::env::temp_dir()];
@@ -755,11 +811,78 @@ mod tests {
         let tmp = std::env::temp_dir().join("bili_add_on_range_test.mp4");
         std::fs::write(&tmp, b"fake").unwrap();
         let mut args = default_args();
-        args.input = tmp.clone();
+        args.input = tmp.display().to_string();
         args.range = Some("1:23-5:00".to_string());
         assert!(args.check().is_ok());
         args.range = Some("162:12".to_string());
         assert!(args.check().is_ok());
         std::fs::remove_file(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_clap_parse_stdin_stdout() {
+        use clap::Parser;
+        let args = Args::try_parse_from([
+            "bili_add_on",
+            "--input",
+            STDIN,
+            "--output",
+            STDOUT,
+            "--bvid",
+            "BV1test",
+        ])
+        .unwrap();
+        assert_eq!(args.input, STDIN);
+        assert_eq!(args.output.as_deref(), Some(STDOUT));
+    }
+
+    #[test]
+    fn test_check_stdin_skips_file_checks() {
+        let mut args = default_args();
+        args.input = STDIN.to_string();
+        assert!(args.check().is_ok());
+    }
+
+    #[test]
+    fn test_check_output_requires_explicit_output_for_stdin() {
+        let mut args = default_args();
+        args.input = STDIN.to_string();
+        args.output = None;
+        assert!(args.check_output().is_err());
+
+        args.output = Some(STDOUT.to_string());
+        assert!(args.check_output().is_ok());
+    }
+
+    #[test]
+    fn test_check_audio_file_validation() {
+        let mut args = default_args();
+        args.audio = Some(PathBuf::from("definitely_missing_audio.m4a"));
+        assert!(args.check().is_err());
+        args.audio = Some(std::env::temp_dir());
+        assert!(args.check().is_err());
+    }
+
+    #[test]
+    fn test_check_audio_conflicts() {
+        let mut args = default_args();
+        args.audio = Some(PathBuf::from("audio.m4a"));
+        args.no_audio = true;
+        assert!(args.check().is_err());
+
+        let mut args = default_args();
+        args.audio_range = Some("5-10".to_string());
+        args.no_audio = true;
+        assert!(args.check().is_err());
+    }
+
+    #[test]
+    fn test_check_audio_range_with_stdin_is_warn_only() {
+        let mut args = default_args();
+        args.input = STDIN.to_string();
+        args.audio_range = Some("5-10".to_string());
+        assert!(args.check().is_ok());
+        args.audio_range = Some("10-5".to_string());
+        assert!(args.check().is_err());
     }
 }

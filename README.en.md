@@ -43,14 +43,54 @@ bili_add_on --input input.mp4 --xml danmaku.xml
 
 Exactly one of `--bvid` and `--xml` is required.
 
+### stdin / stdout
+
+`--input :STDIN:` reads the video from stdin; `--output :STDOUT:` writes the result to stdout (progress and logs always go to stderr). Either can be used alone, or combined to form a pipeline:
+
+```bash
+# Produce a streamable fMP4, process it through a pipe, and write to stdout
+ffmpeg -i input.mp4 -c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1 \
+    | bili_add_on --input :STDIN: --output :STDOUT: --bvid BV1xxxxxxxxxx > output.mp4
+```
+
+Limitations and notes:
+
+- stdin input must be a **streamable** container (e.g. fMP4 / MPEG-TS / WebM). A regular MP4 (moov at the end of the file) cannot be parsed from a pipe; convert it to faststart/fMP4 first.
+- The video's built-in audio cannot be remuxed from stdin (the stream is consumed by the decoder); a warning is printed and the output is video-only. Pass `--audio` to supply an external audio file instead.
+- stdin input cannot be seeked; `--range` with a start time > 0 is reached by dropping frames. When the duration is unknown, the out-of-range validation for the `--range` start time is skipped.
+- With stdin input, `--output` is required (no default filename can be generated).
+- Output to stdout is written after processing completes (temp file first), not streamed incrementally.
+
+### External audio source and audio trimming
+
+`--audio` overrides the video's built-in audio with an external file; `--audio-range` first trims the audio on the audio-source timeline, aligns the trimmed start with the video start, then cuts it together with the video by `--range`:
+
+```bash
+# Example: audio source A=[0:00:00-0:30:00]; --audio-range 5-10 trims B=[0:00:05-0:00:10]
+#          aligned to the video start; --range 3 then takes the first 3 s of B
+#          → output audio = A[5s, 8s)
+bili_add_on --input input.mp4 --xml danmaku.xml \
+    --audio audio.m4a --audio-range 5-10 --range 3
+```
+
+Full example with stdin input and an external audio source:
+
+```bash
+ffmpeg -i input.mp4 -c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1 \
+    | bili_add_on --input :STDIN: --output out.mp4 --xml danmaku.xml \
+        --audio audio.m4a --audio-range 5-10
+```
+
 ### Options
 
 | Option | Short | Default | Description |
 |--------|-------|---------|-------------|
-| `--input` | `-i` | **required** | Input video file path |
-| `--output` | `-o` | `bili_add_on_<source name>` | Output video path |
+| `--input` | `-i` | **required** | Input video file path, or `:STDIN:` to read from stdin |
+| `--output` | `-o` | `bili_add_on_<source name>` | Output video path, or `:STDOUT:` to write to stdout |
 | `--bvid` | | | Bilibili video ID (e.g. `BV1xxxxxxxxxx`), danmaku is fetched automatically |
 | `--xml` | `-x` | | Path to a local danmaku XML file |
+| `--audio` | | | Path to an audio source file, overriding the video's built-in audio (useful with stdin input) |
+| `--audio-range` | | | Audio trim range: `{start}-{end}` or `{end}`; audio is trimmed and aligned to the video start, then cut together with the video by `--range` |
 | `--opacity` | | `0.93` | Danmaku opacity, in range 0~1 |
 | `--top-ratio` | `-t` | `0.0` | Top edge of the danmaku area as a fraction of video height; 0 = top |
 | `--bottom-ratio` | `-b` | `1.0` | Bottom edge of the danmaku area as a fraction of video height; 1 = bottom |
@@ -159,7 +199,7 @@ Advanced danmaku (mode 7) is parsed but not rendered.
 ## Output format
 
 - Video encoding: H.264 YUV420P (NVENC / AMF / QSV hardware acceleration supported)
-- All audio tracks of the input are preserved by default (stream copy, no quality loss)
+- All audio tracks of the input are preserved by default (stream copy, no quality loss); `--audio` can override them with an external audio source
 - Default output naming: `bili_add_on_<source file name>`
 - Use `--no-audio` for a video-only output
 

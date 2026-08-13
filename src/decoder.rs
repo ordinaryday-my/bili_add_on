@@ -36,6 +36,7 @@ pub struct VideoDecoder {
     total_reported: bool,
     range: Option<(f64, f64)>,
     seeked: bool,
+    seekable: bool,
 }
 
 impl VideoDecoder {
@@ -52,9 +53,13 @@ impl VideoDecoder {
 
         let frame_rate = {
             let rate = stream.rate();
-            if rate.denominator() > 0 {
-                let r_frame_rate = rate.numerator() as f32 / rate.denominator() as f32;
+            let r_frame_rate = if rate.denominator() > 0 {
+                rate.numerator() as f32 / rate.denominator() as f32
+            } else {
+                0.0
+            };
 
+            let mut fr = if r_frame_rate > 0.0 {
                 let frames = stream.frames();
                 let raw_duration = stream.duration();
                 if frames > 0 && raw_duration > 0 {
@@ -70,7 +75,17 @@ impl VideoDecoder {
                 }
             } else {
                 0.0
+            };
+
+            // 非可寻址输入（如 stdin 管道）可能无法推断 r_frame_rate，
+            // 回退到 avg_frame_rate，保证时间线（帧间隔/PTS）可用。
+            if fr <= 0.0 {
+                let avg = stream.avg_frame_rate();
+                if avg.denominator() > 0 {
+                    fr = avg.numerator() as f32 / avg.denominator() as f32;
+                }
             }
+            fr
         };
 
         let mut ctx = AvContext::new();
@@ -99,6 +114,14 @@ impl VideoDecoder {
         )
         .context("创建解码器像素格式转换器失败")?;
 
+        // 判断底层协议是否可随机寻址（普通文件可寻址，stdin 管道/网络流不可寻址）。
+        // 不可寻址时 --range 起始时间只能靠逐帧丢弃到达，无法 seek。
+        let seekable = unsafe {
+            const AVIO_SEEKABLE_NORMAL: i32 = 1;
+            let fmt = input.as_ptr();
+            !(*fmt).pb.is_null() && (*(*fmt).pb).seekable & AVIO_SEEKABLE_NORMAL != 0
+        };
+
         Ok(Self {
             input,
             decoder,
@@ -119,6 +142,7 @@ impl VideoDecoder {
             total_reported: false,
             range: None,
             seeked: false,
+            seekable,
         })
     }
 
@@ -164,13 +188,15 @@ impl VideoDecoder {
 
     fn seek_to_range_start(&mut self) -> Result<()> {
         let (start, _) = self.range.unwrap();
-        if start > 0.0 {
+        if start > 0.0 && self.seekable {
             let target = (start * ffmpeg::ffi::AV_TIME_BASE as f64) as i64;
             self.input
                 .seek(target, ..target.saturating_add(1))
                 .context("跳转到起始时间失败")?;
             self.decoder.flush();
         }
+        // 不可寻址输入（stdin 管道）无法 seek，由 read_into 中的逐帧丢弃
+        // （ts < start 时 continue）到达起始时间。
         self.draining = false;
         self.last_ts = None;
         self.seeked = true;

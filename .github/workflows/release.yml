@@ -133,17 +133,17 @@ jobs:
         run: |
           Compress-Archive -Path dist-ffmpeg\* -DestinationPath "target\release\bili_add_on-${{ matrix.target }}-with-ffmpeg.zip" -CompressionLevel Optimal
 
-      - name: Create ffmpeg bundle zip (Linux)
+      - name: Create ffmpeg bundle tarball (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
-          (cd dist-ffmpeg && python3 -m zipfile -c "../target/release/bili_add_on-${{ matrix.target }}-with-ffmpeg.zip" .)
+          (cd dist-ffmpeg && tar -czf "../target/release/bili_add_on-${{ matrix.target }}-with-ffmpeg.tar.gz" .)
 
-      - name: Create ffmpeg bundle zip (macOS)
+      - name: Create ffmpeg bundle tarball (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          (cd dist-ffmpeg && tar -a -c -f "../target/release/bili_add_on-${{ matrix.target }}-with-ffmpeg.zip" .)
+          (cd dist-ffmpeg && tar -czf "../target/release/bili_add_on-${{ matrix.target }}-with-ffmpeg.tar.gz" .)
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -158,7 +158,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: bili_add_on-${{ matrix.target }}-with-ffmpeg
-          path: target/release/bili_add_on-${{ matrix.target }}-with-ffmpeg.zip
+          path: target/release/bili_add_on-${{ matrix.target }}-with-ffmpeg.*
           if-no-files-found: error
 
   publish:

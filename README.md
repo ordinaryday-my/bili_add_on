@@ -43,14 +43,53 @@ bili_add_on --input input.mp4 --xml danmaku.xml
 
 `--bvid` 和 `--xml` 二者必选其一，不可同时使用。
 
+### 标准输入 / 标准输出
+
+`--input :STDIN:` 从标准输入读取视频，`--output :STDOUT:` 将结果写入标准输出（进度与日志始终输出到 stderr）。两者可单独使用，也可组合形成管道：
+
+```bash
+# 生成可流式传输的 fMP4，经管道处理后输出到标准输出
+ffmpeg -i input.mp4 -c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1 \
+    | bili_add_on --input :STDIN: --output :STDOUT: --bvid BV1xxxxxxxxxx > output.mp4
+```
+
+限制与注意事项：
+
+- stdin 输入必须是**可流式**容器（如 fMP4 / MPEG-TS / WebM）。普通 MP4（moov 在文件尾部）无法从管道解析，需先转为 faststart/fMP4。
+- stdin 输入无法混流视频自带音频（输入流已被解码消费），会打印警告并输出纯视频；此时可用 `--audio` 指定外部音频文件来保留音频。
+- stdin 输入无法 seek，`--range` 起始时间 >0 时通过逐帧丢弃到达；时长未知时跳过 `--range` 起始时间的越界校验。
+- 使用 stdin 输入时 `--output` 不可省略（无法自动生成默认文件名）。
+- 输出到 stdout 时先写入临时文件再整体输出，并非边处理边输出。
+
+### 外部音频源与音频裁剪
+
+`--audio` 使用外部音频文件覆盖视频自带音频；`--audio-range` 先按音频源时间轴裁剪，裁剪后的开头与视频开头对齐，随后与视频一起按 `--range` 裁剪：
+
+```bash
+# 示例：音频源 A=[0:00:00-0:30:00]，--audio-range 5-10 裁出 B=[0:00:05-0:00:10]
+#       并与视频开头对齐；--range 3 再取 B 的前 3 秒 → 输出音频 = A[5s, 8s)
+bili_add_on --input input.mp4 --xml danmaku.xml \
+    --audio audio.m4a --audio-range 5-10 --range 3
+```
+
+stdin 输入搭配外部音频的完整示例：
+
+```bash
+ffmpeg -i input.mp4 -c copy -movflags frag_keyframe+empty_moov -f mp4 pipe:1 \
+    | bili_add_on --input :STDIN: --output out.mp4 --xml danmaku.xml \
+        --audio audio.m4a --audio-range 5-10
+```
+
 ### 参数说明
 
 | 参数 | 简写 | 默认值 | 说明 |
 |------|------|--------|------|
-| `--input` | `-i` | **必填** | 输入视频文件路径 |
-| `--output` | `-o` | `bili_add_on_<源文件名>` | 输出视频路径 |
+| `--input` | `-i` | **必填** | 输入视频文件路径，或 `:STDIN:` 从标准输入读取 |
+| `--output` | `-o` | `bili_add_on_<源文件名>` | 输出视频路径，或 `:STDOUT:` 输出到标准输出 |
 | `--bvid` | | | B 站视频 ID（如 `BV1xxxxxxxxxx`），自动拉取弹幕 |
 | `--xml` | `-x` | | 本地弹幕 XML 文件路径 |
+| `--audio` | | | 音频源文件路径，覆盖视频自带音频（stdin 输入时可用此参数保留音频） |
+| `--audio-range` | | | 音频裁剪时段：`{起始}-{结束}` 或 `{结束}`；先按此裁剪音频并对齐视频开头，再随视频一起按 `--range` 裁剪 |
 | `--opacity` | | `0.93` | 弹幕不透明度，取值范围 0~1 |
 | `--top-ratio` | `-t` | `0.0` | 弹幕显示区域上界与画面高度比值，0 为顶端 |
 | `--bottom-ratio` | `-b` | `1.0` | 弹幕显示区域下界与画面高度比值，1 为底端 |
@@ -159,7 +198,7 @@ bili_add_on --input input.mp4 --bvid BV1xxxxxxxxxx \
 ## 输出格式
 
 - 视频编码：H.264 YUV420P（支持 NVENC / AMF / QSV 硬件加速编码）
-- 默认保留输入视频的所有音频轨道（流拷贝，无质量损失）
+- 默认保留输入视频的所有音频轨道（流拷贝，无质量损失）；可用 `--audio` 指定外部音频源覆盖
 - 输出文件默认命名规则：`bili_add_on_<源文件名>`
 - 使用 `--no-audio` 可输出纯视频文件
 

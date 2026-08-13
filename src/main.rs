@@ -1,4 +1,9 @@
-use std::{fs, process::exit, time::Instant};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+    process::exit,
+    time::Instant,
+};
 
 use anyhow::{Context, anyhow, bail};
 #[cfg(not(feature = "dhat-heap"))]
@@ -11,7 +16,7 @@ use crate::{
     },
     decoder::VideoDecoder,
     encoder::{EncoderPref, same_specifications},
-    interaction::Args,
+    interaction::{Args, STDIN, STDOUT},
 };
 
 mod audio;
@@ -67,6 +72,13 @@ fn run() -> anyhow::Result<()> {
         .transpose()
         .context("--range 参数解析失败")?;
 
+    let audio_range = args
+        .audio_range
+        .as_deref()
+        .map(interaction::parse_time_range)
+        .transpose()
+        .context("--audio-range 参数解析失败")?;
+
     let xml = if let Some(id) = &args.source.bvid {
         get_danmaku_xml_by_bili_id(id)
             .with_context(|| format!("获取B站弹幕数据失败 (bvid: {id})"))?
@@ -109,30 +121,54 @@ fn run() -> anyhow::Result<()> {
         eprintln!("{}", lang.t("codec_ready"));
     }
 
-    let output_path = args.output.clone().unwrap();
+    let input_is_stdin = args.input == STDIN;
+    let input_url = if input_is_stdin {
+        "pipe:0".to_string()
+    } else {
+        args.input.clone()
+    };
+
+    let output_path: Option<PathBuf> = match args.output.as_deref() {
+        Some(STDOUT) => None,
+        Some(dest) => Some(PathBuf::from(dest)),
+        None => unreachable!("check_output 已保证输出路径存在"),
+    };
+    let output_is_stdout = output_path.is_none();
+
+    let temp_dir = match output_path.as_deref() {
+        Some(p) => p
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .to_path_buf(),
+        None => std::env::temp_dir(),
+    };
 
     let temp_file = tempfile::Builder::new()
         .prefix(".bili_add_on_")
         .suffix(".mp4")
-        .tempfile_in(output_path.parent().unwrap_or(std::path::Path::new(".")))
+        .tempfile_in(&temp_dir)
         .context("无法在输出目录创建临时文件")?;
     let temp_path = temp_file.into_temp_path();
 
-    let decoder = VideoDecoder::new(&args.input).with_context(|| {
+    let decoder = VideoDecoder::new(Path::new(&input_url)).with_context(|| {
         format!(
-            "视频解码器创建失败，无法解码源文件: {}",
-            args.input.display()
+            "视频解码器创建失败，无法解码源: {}",
+            if input_is_stdin { "stdin (pipe:0)" } else { &args.input }
         )
     })?;
 
     if let Some((start, _)) = range {
-        let video_duration = if decoder.frame_rate() > 0.0 {
-            decoder.frame_count() as f64 / decoder.frame_rate() as f64
-        } else {
-            0.0
-        };
-        if start >= video_duration {
-            bail!("--range 起始时间 ({start} 秒) 超出视频时长 ({video_duration:.3} 秒)");
+        let frame_count = decoder.frame_count();
+        let frame_rate = decoder.frame_rate();
+        if frame_count > 0 && frame_rate > 0.0 {
+            let video_duration = frame_count as f64 / frame_rate as f64;
+            if start >= video_duration {
+                bail!("--range 起始时间 ({start} 秒) 超出视频时长 ({video_duration:.3} 秒)");
+            }
+        } else if !args.quiet {
+            // 管道/流式输入（如 stdin）或部分容器无法预知时长，跳过校验。
+            eprintln!("{}", lang.t("range_unknown_duration"));
         }
     }
 
@@ -169,24 +205,85 @@ fn run() -> anyhow::Result<()> {
     )
     .context("视频处理流程失败（弹幕渲染到视频帧时出错）")?;
 
-    if args.no_audio || !audio::has_audio(&args.input).unwrap_or(false) {
-        fs::rename(&*temp_path, &output_path).with_context(|| {
-            format!(
-                "无法将临时视频移动到输出路径: {} -> {}",
-                temp_path.display(),
-                output_path.display()
-            )
-        })?;
-    } else {
-        if !args.quiet {
-            eprintln!("{}", lang.t("merging_audio"));
+    // 音频源解析：--audio 指定文件 > 视频自带音频（文件输入）> 无（stdin 输入时警告）
+    let audio_source: Option<PathBuf> = if args.no_audio {
+        None
+    } else if let Some(p) = &args.audio {
+        if !audio::has_audio(p)
+            .with_context(|| format!("无法检测音频源文件: {}", p.display()))?
+        {
+            bail!("音频源文件中没有音频流: {}", p.display());
         }
-        audio::remux_audio_range(&temp_path, &args.input, &output_path, range)
-            .context("音频混流失败")?;
+        Some(p.clone())
+    } else if !input_is_stdin && audio::has_audio(Path::new(&args.input)).unwrap_or(false) {
+        Some(PathBuf::from(&args.input))
+    } else {
+        None
+    };
+
+    if audio_source.is_none() && !args.no_audio && !args.quiet {
+        if input_is_stdin {
+            eprintln!("{}", lang.t("stdin_audio_skipped"));
+        } else if args.audio_range.is_some() {
+            eprintln!("{}", lang.t("audio_range_ignored"));
+        }
+    }
+
+    // stdout 输出且需要混流时，先混入第二个临时文件再流式写出
+    let second_temp = if output_is_stdout && audio_source.is_some() {
+        Some(
+            tempfile::Builder::new()
+                .prefix(".bili_add_on_")
+                .suffix(".mp4")
+                .tempfile_in(&temp_dir)
+                .context("无法创建音频混流临时文件")?
+                .into_temp_path(),
+        )
+    } else {
+        None
+    };
+
+    // 处理完成后得到最终视频文件位置
+    let final_path: PathBuf = match (&output_path, &audio_source) {
+        (Some(out), Some(src)) => {
+            if !args.quiet {
+                eprintln!("{}", lang.t("merging_audio"));
+            }
+            audio::remux_audio(&temp_path, src, out, audio_range, range).context("音频混流失败")?;
+            out.clone()
+        }
+        (None, Some(src)) => {
+            if !args.quiet {
+                eprintln!("{}", lang.t("merging_audio"));
+            }
+            let target = second_temp.as_ref().unwrap();
+            audio::remux_audio(&temp_path, src, target, audio_range, range)
+                .context("音频混流失败")?;
+            target.to_path_buf()
+        }
+        (Some(out), None) => {
+            fs::rename(&*temp_path, out).with_context(|| {
+                format!(
+                    "无法将临时视频移动到输出路径: {} -> {}",
+                    temp_path.display(),
+                    out.display()
+                )
+            })?;
+            out.clone()
+        }
+        (None, None) => temp_path.to_path_buf(),
+    };
+
+    if output_is_stdout {
+        stream_to_stdout(&final_path)?;
+        if !args.quiet {
+            eprintln!("{}", lang.t("output_stdout"));
+        }
+    } else if !args.quiet {
+        eprintln!("{}", lang.t_fmt("output_file", final_path.display()));
     }
 
     if !args.quiet {
-        eprintln!("{}", lang.t_fmt("output_file", output_path.display()));
         eprintln!(
             "{}",
             lang.t_fmt(
@@ -195,5 +292,13 @@ fn run() -> anyhow::Result<()> {
             )
         );
     }
+    Ok(())
+}
+
+fn stream_to_stdout(path: &Path) -> anyhow::Result<()> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("无法打开临时文件以输出到标准输出: {}", path.display()))?;
+    let mut stdout = io::stdout().lock();
+    io::copy(&mut file, &mut stdout).context("写入标准输出失败")?;
     Ok(())
 }

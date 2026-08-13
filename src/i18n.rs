@@ -24,11 +24,31 @@ const BILINGUAL: &[(&str, &str, &str)] = &[
         "Merging audio tracks...",
     ),
     ("output_file", "输出文件: {}", "Output file: {}"),
+    (
+        "output_stdout",
+        "已输出到标准输出",
+        "Written to stdout",
+    ),
     ("done_in", "完成，总用时 {} 秒", "Done in {} seconds"),
     (
         "render_progress",
         "正在渲染弹幕... 已处理 {} 帧",
         "Rendering danmaku... {} frames processed",
+    ),
+    (
+        "stdin_audio_skipped",
+        "stdin 输入无法混流音频，已跳过音频（可通过 --audio 指定音频文件）",
+        "Audio cannot be remuxed from stdin input; audio skipped (pass --audio to provide an audio file)",
+    ),
+    (
+        "audio_range_ignored",
+        "未找到可用的音频源，--audio-range 被忽略",
+        "No audio source available; --audio-range ignored",
+    ),
+    (
+        "range_unknown_duration",
+        "无法校验 --range 起始时间（视频时长未知，可能来自流式输入）",
+        "Cannot validate --range start time (video duration unknown; input may be a stream)",
     ),
     // ---- CLI 命令简介 ----
     (
@@ -37,11 +57,25 @@ const BILINGUAL: &[(&str, &str, &str)] = &[
         "CLI tool to overlay Bilibili danmaku (bullet comments) onto videos; fetches danmaku XML by Bilibili video ID or from a local file",
     ),
     // ---- CLI 参数帮助 ----
-    ("input", "输入视频文件路径", "Input video file path"),
+    (
+        "input",
+        "输入视频文件路径，或 :STDIN: 从标准输入读取",
+        "Input video file path, or :STDIN: to read from stdin",
+    ),
     (
         "output",
-        "输出视频路径（默认在源文件名前添加 bili_add_on_ 前缀）",
-        "Output video path (defaults to bili_add_on_<source name>)",
+        "输出视频路径，或 :STDOUT: 输出到标准输出（默认在源文件名前添加 bili_add_on_ 前缀）",
+        "Output video path, or :STDOUT: to write to stdout (defaults to bili_add_on_<source name>)",
+    ),
+    (
+        "audio",
+        "音频源文件路径，覆盖视频自带音频（stdin 输入时可用此参数保留音频）",
+        "Path to an audio source file, overriding the video's built-in audio (useful with stdin input)",
+    ),
+    (
+        "audio_range",
+        "音频裁剪时段：{起始}-{结束} 或 {结束}；先按此裁剪音频并对齐视频开头，再随视频一起按 --range 裁剪",
+        "Audio trim range: {start}-{end} or {end}; audio is trimmed and aligned to the video start, then cut together with the video by --range",
     ),
     (
         "bvid",

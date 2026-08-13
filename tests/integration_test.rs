@@ -31,8 +31,8 @@ fn test_cli_full_args_parsing() {
     ])
     .unwrap();
 
-    assert_eq!(args.input.to_string_lossy(), "video.mp4");
-    assert_eq!(args.output.unwrap().to_string_lossy(), "out.mp4");
+    assert_eq!(args.input, "video.mp4");
+    assert_eq!(args.output.unwrap(), "out.mp4");
     assert_eq!(args.source.bvid.unwrap(), "BV1fRNH6kEra");
     assert!(args.source.xml.is_none());
     assert!((args.opacity - 0.5).abs() < f64::EPSILON);
@@ -111,9 +111,28 @@ fn test_check_output_path_generation() {
     args.check_output().unwrap();
     let out = args.output.unwrap();
     assert_eq!(
-        out.file_name().unwrap().to_string_lossy(),
+        std::path::Path::new(&out)
+            .file_name()
+            .unwrap()
+            .to_string_lossy(),
         "bili_add_on_test_video.mp4"
     );
+}
+
+#[test]
+fn test_cli_stdin_stdout_special_values() {
+    let args = Args::try_parse_from([
+        "bili_add_on",
+        "--input",
+        bili_add_on::interaction::STDIN,
+        "--output",
+        bili_add_on::interaction::STDOUT,
+        "--bvid",
+        "BV1test",
+    ])
+    .unwrap();
+    assert_eq!(args.input, bili_add_on::interaction::STDIN);
+    assert_eq!(args.output.as_deref(), Some(bili_add_on::interaction::STDOUT));
 }
 
 #[test]
